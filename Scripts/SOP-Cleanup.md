@@ -47,7 +47,8 @@ gate, at the summary, and in the manual checklist.
 
 ## Manual checklist (needs your judgement)
 
-The script prints this too; it stays on screen until you dismiss it.
+These are not printed on screen - the script ends at the summary - so work
+them from this document.
 
 11. **ClamAV**: run `Tools\ClamAV\freshclam.exe`, then scan `C:\Users`,
     `C:\ProgramData`, `C:\Windows\Temp` with `clamscan.exe -r -i
