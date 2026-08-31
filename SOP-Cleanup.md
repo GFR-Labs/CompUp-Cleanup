@@ -4,6 +4,11 @@ Tech-facing procedure. Follow the numbers; do not skip or reorder. The
 automated portion does the waiting for you - your judgement is needed at the
 gate, at the summary, and in the manual checklist.
 
+> **On the bench, before you head out:** double-click `Update.cmd` on the
+> stick to pull the current version, and run `Tools\ClamAV\freshclam.exe` to
+> refresh virus definitions. Both need internet, so neither can be done at
+> the customer machine.
+
 ## Before you start
 
 1. Confirm the work order covers a cleanup and note any customer remarks

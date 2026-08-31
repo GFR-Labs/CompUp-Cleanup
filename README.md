@@ -16,8 +16,7 @@ Targets: Windows 10 and Windows 11 customer machines, Windows PowerShell 5.1
 |------|---------|
 | `Run-Cleanup.cmd` | Double-click this on the customer machine. Elevates itself (UAC prompt), bypasses execution policy, launches the cleanup, and keeps the window open no matter what. |
 | `Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and the manual checklist. |
-| `Run-Update.cmd` | Double-click this on the BENCH machine to refresh the stick from GitHub. |
-| `Update-FromGitHub.ps1` | The updater: `git pull` when git exists, otherwise downloads the repo zip and extracts it over this folder. Never touches `Tools\`. |
+| `Update.cmd` | Double-click this on the BENCH machine to bring the stick up to the repo's current state. Self-contained: `git pull` when git exists, otherwise downloads the repo zip. Never touches `Tools\`. |
 | `SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
 | `.gitignore` / `.gitattributes` | Keep tool binaries and logs out of the repo; keep line endings byte-exact. |
 
@@ -27,8 +26,7 @@ Targets: Windows 10 and Windows 11 customer machines, Windows PowerShell 5.1
 X:\CompUp-Cleanup\
     Run-Cleanup.cmd          <- tech runs this on the customer machine
     Invoke-Cleanup.ps1
-    Run-Update.cmd           <- tech runs this on the bench machine
-    Update-FromGitHub.ps1
+    Update.cmd               <- tech runs this on the bench machine
     README.md
     SOP-Cleanup.md
     Tools\                   <- NOT in the repo; download by hand
@@ -52,15 +50,35 @@ them.
 
 ## Updating a stick
 
-On the bench machine (internet required): double-click `Run-Update.cmd`.
+On the bench machine (internet required): double-click `Update.cmd`. That is
+the whole procedure - it is one self-contained file with no companion script.
 
-- If git is installed and the folder is a clone, it does a `git pull`.
-- Otherwise it downloads the repo zip from GitHub and copies it over the
-  folder. Nothing is deleted, so `Tools\` and any local files survive.
+What it does:
+
+- Refuses to run against a folder that has no `Invoke-Cleanup.ps1` in it, so
+  a wrong path cannot unpack the repo over some unrelated directory.
+- Uses `git pull --ff-only` if git is installed and the folder is a clone.
+  Falls back to downloading the repo zip otherwise, and also if the pull is
+  refused (local edits to tracked files are the usual reason).
+- Never deletes anything. `Tools\`, local notes, and logs all survive. The
+  cost of that rule: a file removed from the repo is not removed from the
+  stick by the zip path. `git pull` does remove it.
+- Prints exactly which files changed, so "did that do anything?" has an
+  answer.
+- Verifies encoding afterwards - ASCII, CRLF, BOM on `.ps1`, no BOM on
+  `.cmd` - and says loudly not to take the stick out if a file is broken.
+
+It updates itself safely. `Update.cmd` first copies itself to `%TEMP%` and
+re-runs from there, because cmd.exe reads a batch file by seeking to a saved
+byte offset after each command: a batch file that overwrites itself mid-run
+resumes at a stale offset and executes fragments of whatever now sits there.
 
 ClamAV definitions are separate from repo updates: run
 `Tools\ClamAV\freshclam.exe` on the bench machine to refresh them before
 heading out.
+
+The updater tracks the repo's **`main`** branch. Work still sitting on a
+feature branch will not reach a stick until it is merged.
 
 ## Encoding rules (do not "fix" these)
 

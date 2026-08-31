@@ -19,7 +19,7 @@ what is on the stick.
 
 1. `Invoke-Cleanup.ps1` - the main script
 2. `Run-Cleanup.cmd` - double-click launcher
-3. `Update-FromGitHub.ps1` + `Run-Update.cmd` - refresh the stick from the repo
+3. `Update.cmd` - single self-contained file that refreshes the stick from the repo
 4. `README.md` - what each file does, USB folder layout, how to update
 5. `SOP-Cleanup.md` - the tech-facing procedure, written as numbered steps
 
@@ -126,10 +126,16 @@ hand, because each needs human judgement. Keep it on screen until dismissed.
 
 ## Update mechanism
 
-`Update-FromGitHub.ps1` refreshes the stick. Use `git pull` when git is available, and fall
-back to downloading the repo zip and extracting over the folder when it is not - techs'
-bench machines may not have git. Preserve any local `Tools\` folder containing downloaded
-binaries; those are gitignored and must not be wiped by an update.
+`Update.cmd` refreshes the stick, as ONE self-contained double-clickable file (the
+PowerShell payload is embedded in it, below a marker line). Use `git pull` when git is
+available, and fall back to downloading the repo zip and extracting over the folder when
+it is not - techs' bench machines may not have git. Preserve any local `Tools\` folder
+containing downloaded binaries; those are gitignored and must not be wiped by an update.
+
+The updater overwrites its own file, so it must copy itself to `%TEMP%` and re-run from
+there first. cmd.exe seeks back to a saved byte offset in the batch file after each
+command instead of loading it into memory, so a batch file that replaces itself mid-run
+resumes at a stale offset and executes garbage.
 
 Add a `.gitignore` for `Tools\`, `*.log`, and any downloaded executables.
 
