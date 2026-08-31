@@ -19,7 +19,7 @@ in `Scripts\`, out of the way.
 |------|---------|
 | `Run-Cleanup.cmd` | Double-click this on the customer machine. Elevates itself (UAC prompt), bypasses execution policy, launches the cleanup, and keeps the window open no matter what. |
 | `Update.cmd` | Double-click this on the BENCH machine to bring the stick up to the repo's current state. Self-contained: `git pull` when git exists, otherwise downloads the repo zip. Never touches `Tools\`. |
-| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and the manual checklist. |
+| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and findings. |
 | `Scripts\SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
 | `.gitignore` / `.gitattributes` | Keep tool binaries and logs out of the repo; keep line endings byte-exact. |
 
@@ -47,11 +47,11 @@ Both launchers are inside the repo, so `Update.cmd` updates them along with
 everything else. If you ever move them outside the clone, they stop
 receiving fixes entirely - `git pull` only touches files inside the clone.
 
-Three places depend on this layout, so moving files around needs all three
-changed together: `Run-Cleanup.cmd` looks for `Scripts\Invoke-Cleanup.ps1`
-beside itself, `Update.cmd` uses that same path as its "is this really a
-cleanup stick" check, and `Invoke-Cleanup.ps1` walks one level UP from
-itself to find `Tools\` for the manual checklist.
+Two places depend on this layout and must change together:
+`Run-Cleanup.cmd` looks for `Scripts\Invoke-Cleanup.ps1` beside itself, and
+`Update.cmd` uses that same path as its "is this really a cleanup stick"
+check. Nothing in the scripts resolves `Tools\` any more - the manual
+checklist that used to print its path lives in `Scripts\SOP-Cleanup.md`.
 
 ## Setting up a new stick
 
@@ -69,7 +69,7 @@ the whole procedure - it is one self-contained file with no companion script.
 
 What it does:
 
-- Refuses to run against a folder that has no `Invoke-Cleanup.ps1` in it, so
+- Refuses to run against a folder that has no `Scripts\Invoke-Cleanup.ps1`, so
   a wrong path cannot unpack the repo over some unrelated directory.
 - Uses `git pull --ff-only` if git is installed and the folder is a clone.
   Falls back to downloading the repo zip otherwise, and also if the pull is

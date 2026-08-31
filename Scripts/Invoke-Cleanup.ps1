@@ -40,17 +40,6 @@ if (-not $script:ScriptRoot) {
     $script:ScriptRoot = (Get-Location).Path
 }
 
-# This script lives in Scripts\, but Tools\ sits beside that folder at the
-# stick root - so the checklist must print the PARENT. Getting this wrong
-# hands the tech a Tools path that does not exist, and it is pasted straight
-# into the ClamAV command, so it fails at the point of use rather than here.
-$script:StickRoot = $null
-try {
-    $script:StickRoot = Split-Path -Parent $script:ScriptRoot
-} catch { }
-# Split-Path returns empty at a drive root; fall back rather than print ''.
-if (-not $script:StickRoot) { $script:StickRoot = $script:ScriptRoot }
-
 # ---------------------------------------------------------------------------
 # Run-wide state
 # ---------------------------------------------------------------------------
@@ -1019,54 +1008,16 @@ function Show-Summary {
     Write-Host $thin
     Write-Host ('  VERDICT: ' + $verdict.Text) -ForegroundColor $verdict.Color
     Write-Host $bar -ForegroundColor Cyan
-    Write-Log ('VERDICT: ' + $verdict.Text)
-}
-
-# ---------------------------------------------------------------------------
-# Post-script manual checklist. Each of these needs human judgement, which
-# is why they are not automated.
-# ---------------------------------------------------------------------------
-function Show-Checklist {
-    # StickRoot, not ScriptRoot: this script is in Scripts\ and Tools\ is its
-    # sibling one level up. Plain concatenation, not Join-Path: Join-Path
-    # throws "Cannot find drive" if the stick has been pulled, and losing the
-    # checklist after a two-hour run because the tech unplugged early is not
-    # acceptable.
-    $toolsPath = ('' + $script:StickRoot).TrimEnd('\') + '\Tools'
-    Write-Host ''
-    Write-Host ('=' * 78) -ForegroundColor Yellow
-    Write-Host '  MANUAL CHECKLIST - automated portion is done; work these by hand' -ForegroundColor Yellow
-    Write-Host ('=' * 78) -ForegroundColor Yellow
-    Write-Host ('  Tools folder on this stick: ' + $toolsPath)
-    Write-Host ''
-    Write-Host '  1. ClamAV scan. Run freshclam.exe first (updates definitions), then:'
-    Write-Host ('       clamscan.exe -r -i --database="' + $toolsPath + '\ClamAV\db" C:\Users C:\ProgramData C:\Windows\Temp')
-    Write-Host '     EXCLUDE OneDrive folders: Files On-Demand placeholders hydrate when'
-    Write-Host '     scanned and will download the customer''s entire cloud drive.'
-    Write-Host '     EXCLUDE the legacy junctions "Application Data", "Local Settings",'
-    Write-Host '     "All Users", "Documents and Settings": they loop forever under -r.'
-    Write-Host '  2. Autoruns (Sysinternals GUI): enable "Check VirusTotal" and "Hide'
-    Write-Host '     Microsoft Entries", review everything that remains.'
-    Write-Host '  3. Process Explorer: enable the VirusTotal column, review running'
-    Write-Host '     processes.'
-    Write-Host '  4. BleachBit (portable): browser cache and temp ONLY. Never cookies,'
-    Write-Host '     saved passwords or history - wiping logged-in sessions turns a'
-    Write-Host '     cleanup into a callback.'
-    Write-Host '  5. Defender Offline scan: Windows Security > Virus and threat'
-    Write-Host '     protection > Scan options > Microsoft Defender Antivirus (offline'
-    Write-Host '     scan). Reboots the machine, about 15 minutes. This is the only step'
-    Write-Host '     that inspects the disk while malware is not running.'
-    Write-Host '  6. Browser extension review in every installed browser.'
-    Write-Host '  7. Reboot and confirm the machine is stable before release.'
-    Write-Host ''
     if ($script:LogPath) {
-        # Path on its own line: a real %TEMP% path plus a prefix overflows
-        # even a 120-column console and wraps into something unreadable.
+        # Full chkdsk/DISM/SFC output lives here; it is the only way to
+        # second-guess a result later. Path on its own line because a real
+        # %TEMP% path plus a prefix overflows even a 120-column console.
         Write-Host '  Full run log (on this machine, not the stick):' -ForegroundColor DarkGray
         Write-Host ('    ' + $script:LogPath) -ForegroundColor DarkGray
     }
-    Write-Host ('=' * 78) -ForegroundColor Yellow
+    Write-Log ('VERDICT: ' + $verdict.Text)
 }
+
 
 # ===========================================================================
 # Main
@@ -1121,9 +1072,7 @@ try {
     if ($script:AbortRun) {
         Write-Host ''
         Write-Alert '  Run was stopped at the drive health gate. Take this to the service'
-        Write-Alert '  writer as a drive replacement conversation. Manual checklist skipped.'
-    } else {
-        Show-Checklist
+        Write-Alert '  writer as a drive replacement conversation.'
     }
 } catch {
     # Whole-body catch: print enough to diagnose over the phone.

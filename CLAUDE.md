@@ -30,10 +30,9 @@ lives in `Scripts\`. `Tools\` and `README.md` stay at the root. Keep both launch
 INSIDE the repo - moving them outside the clone means `git pull` can never update
 them again.
 
-Three places encode this layout and must change together: `Run-Cleanup.cmd` resolves
-`%~dp0Scripts\Invoke-Cleanup.ps1`; `Update.cmd` uses that same relative path as its
-"is this a cleanup stick" sentinel; and `Invoke-Cleanup.ps1` resolves `Tools\` from
-the PARENT of its own folder.
+Two places encode this layout and must change together: `Run-Cleanup.cmd` resolves
+`%~dp0Scripts\Invoke-Cleanup.ps1`, and `Update.cmd` uses that same relative path as
+its "is this a cleanup stick" sentinel.
 
 ## Hard requirements
 
@@ -115,10 +114,14 @@ screen. Include:
 
 Use colour: green for clean/OK, yellow for review, red for threats or failures.
 
-## Post-script manual checklist
+## Manual checklist (SOP only - do NOT print it)
 
-After the automated portion, print a numbered checklist of the steps a tech performs by
-hand, because each needs human judgement. Keep it on screen until dismissed.
+These are the steps a tech performs by hand after the automated portion, because each
+needs human judgement. They belong in `Scripts/SOP-Cleanup.md` as numbered steps.
+
+The script must NOT print them: on screen they pushed the run past one screen and buried
+the summary the tech actually copies onto the work order. `Invoke-Cleanup.ps1` ends at
+the summary, findings, warnings, verdict, and the run-log path.
 
 1. **ClamAV scan** - `freshclam.exe` first, then `clamscan.exe -r -i --database=<path>`
    against `C:\Users`, `C:\ProgramData` and `C:\Windows\Temp`. Exclude OneDrive (Files
