@@ -12,12 +12,15 @@ Targets: Windows 10 and Windows 11 customer machines, Windows PowerShell 5.1
 
 ## What each file does
 
+The two files a tech ever double-clicks sit at the top. Everything else is
+in `Scripts\`, out of the way.
+
 | File | Purpose |
 |------|---------|
 | `Run-Cleanup.cmd` | Double-click this on the customer machine. Elevates itself (UAC prompt), bypasses execution policy, launches the cleanup, and keeps the window open no matter what. |
-| `Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and the manual checklist. |
 | `Update.cmd` | Double-click this on the BENCH machine to bring the stick up to the repo's current state. Self-contained: `git pull` when git exists, otherwise downloads the repo zip. Never touches `Tools\`. |
-| `SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
+| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and the manual checklist. |
+| `Scripts\SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
 | `.gitignore` / `.gitattributes` | Keep tool binaries and logs out of the repo; keep line endings byte-exact. |
 
 ## USB folder layout
@@ -25,19 +28,30 @@ Targets: Windows 10 and Windows 11 customer machines, Windows PowerShell 5.1
 ```
 X:\CompUp-Cleanup\
     Run-Cleanup.cmd          <- tech runs this on the customer machine
-    Invoke-Cleanup.ps1
     Update.cmd               <- tech runs this on the bench machine
     README.md
-    SOP-Cleanup.md
+    Scripts\
+        Invoke-Cleanup.ps1
+        SOP-Cleanup.md
     Tools\                   <- NOT in the repo; download by hand
         ClamAV\              (clamscan.exe, freshclam.exe, db\ folder)
         Sysinternals\        (Autoruns.exe, procexp.exe)
         BleachBit\           (portable build)
 ```
 
-The `Tools\` folder is gitignored. Each stick carries its own copies of the
-downloaded binaries; updates from the repo will never delete or overwrite
-them.
+`Tools\` is gitignored and sits at the stick root, NOT inside `Scripts\`.
+Each stick carries its own copies of the downloaded binaries; updates from
+the repo will never delete or overwrite them.
+
+Both launchers are inside the repo, so `Update.cmd` updates them along with
+everything else. If you ever move them outside the clone, they stop
+receiving fixes entirely - `git pull` only touches files inside the clone.
+
+Three places depend on this layout, so moving files around needs all three
+changed together: `Run-Cleanup.cmd` looks for `Scripts\Invoke-Cleanup.ps1`
+beside itself, `Update.cmd` uses that same path as its "is this really a
+cleanup stick" check, and `Invoke-Cleanup.ps1` walks one level UP from
+itself to find `Tools\` for the manual checklist.
 
 ## Setting up a new stick
 

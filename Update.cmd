@@ -92,7 +92,16 @@ $DefaultBranch = 'main'
 
 # A folder only counts as a cleanup stick if this file is in it. Without the
 # check, a wrong argument would unpack the repo over an unrelated directory.
-$Sentinel = 'Invoke-Cleanup.ps1'
+# Held as two parts and joined with Join-Path rather than written as a single
+# 'Scripts\Invoke-Cleanup.ps1' literal, so the separator is never assumed.
+$SentinelDir  = 'Scripts'
+$SentinelFile = 'Invoke-Cleanup.ps1'
+$SentinelName = $SentinelDir + '\' + $SentinelFile   # for messages only
+
+function Get-SentinelPath {
+    param([string]$Root)
+    return (Join-Path (Join-Path $Root $SentinelDir) $SentinelFile)
+}
 
 function Write-Ok   { param([string]$m) Write-Host $m -ForegroundColor Green }
 function Write-Warn { param([string]$m) Write-Host $m -ForegroundColor Yellow }
@@ -163,8 +172,8 @@ try {
         throw ('Stick folder not found: "' + $TargetFolder + '"')
     }
     $TargetFolder = (Resolve-Path -LiteralPath $TargetFolder).Path.TrimEnd('\')
-    if (-not (Test-Path -LiteralPath (Join-Path $TargetFolder $Sentinel))) {
-        throw ('"' + $TargetFolder + '" does not look like a cleanup stick (' + $Sentinel + ' is missing). Refusing to unpack the repo over it.')
+    if (-not (Test-Path -LiteralPath (Get-SentinelPath $TargetFolder))) {
+        throw ('"' + $TargetFolder + '" does not look like a cleanup stick (' + $SentinelName + ' is missing). Refusing to unpack the repo over it.')
     }
     Write-Host ('  Updating: ' + $TargetFolder)
     Write-Host ''
@@ -232,8 +241,8 @@ try {
         # The GitHub zip wraps everything in one "<repo>-<branch>" folder.
         $srcRoot = Get-ChildItem -LiteralPath $extractDir -Directory | Select-Object -First 1
         if (-not $srcRoot) { throw 'The downloaded zip did not contain the expected folder.' }
-        if (-not (Test-Path -LiteralPath (Join-Path $srcRoot.FullName $Sentinel))) {
-            throw ('The downloaded zip is missing ' + $Sentinel + '; refusing to copy it over the stick.')
+        if (-not (Test-Path -LiteralPath (Get-SentinelPath $srcRoot.FullName))) {
+            throw ('The downloaded zip is missing ' + $SentinelName + '; refusing to copy it over the stick.')
         }
 
         # Copy file-by-file and never delete: that is what keeps the
@@ -282,18 +291,27 @@ try {
     Write-Host ''
     Write-Host '  Checking script encoding...'
     $encBad = $false
-    $toCheck = @()
-    $toCheck += @(Get-ChildItem -LiteralPath $TargetFolder -Filter '*.ps1' -File -ErrorAction SilentlyContinue)
-    $toCheck += @(Get-ChildItem -LiteralPath $TargetFolder -Filter '*.cmd' -File -ErrorAction SilentlyContinue)
+    # Recursive: the launchers sit at the root but the scripts live in
+    # Scripts\, so a non-recursive scan would quietly check neither the main
+    # script nor anything added in a future subfolder. Tools\ and .git\ are
+    # skipped - those are not ours and Tools\ may hold third-party scripts.
+    $toCheck = @(Get-ChildItem -LiteralPath $TargetFolder -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($_.Extension -eq '.ps1' -or $_.Extension -eq '.cmd') -and
+            ($_.FullName.Substring($TargetFolder.Length).TrimStart('\', '/') -notmatch '^(Tools|\.git)(\\|/)')
+        })
     foreach ($file in $toCheck) {
         $needsBom = ($file.Extension -eq '.ps1')
         $probs = Test-FileEncoding -Path $file.FullName -RequireBom $needsBom
+        # Show the path relative to the stick, so two files with the same
+        # name in different folders are told apart.
+        $shown = $file.FullName.Substring($TargetFolder.Length).TrimStart('\', '/')
         if ($probs.Count -gt 0) {
-            Write-Bad ('    ' + $file.Name + ': ' + ($probs -join ', '))
+            Write-Bad ('    ' + $shown + ': ' + ($probs -join ', '))
             $encBad = $true
         } else {
             if ($needsBom) { $note = 'ASCII + CRLF + BOM' } else { $note = 'ASCII + CRLF, no BOM' }
-            Write-Ok ('    ' + $file.Name.PadRight(22) + $note)
+            Write-Ok ('    ' + $shown.PadRight(30) + $note)
         }
     }
     if ($encBad) {

@@ -22,5 +22,20 @@ powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
 exit /b
 
 :run
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Invoke-Cleanup.ps1"
+rem The script lives in Scripts\ so the stick root shows only the two
+rem double-clickable launchers. Check for it explicitly: without this, a
+rem stick that was copied without its Scripts\ folder fails with
+rem PowerShell's own argument error, which reads like a script bug rather
+rem than a missing file.
+if not exist "%~dp0Scripts\Invoke-Cleanup.ps1" (
+    echo.
+    echo Cannot find Scripts\Invoke-Cleanup.ps1 next to this launcher.
+    echo This folder is incomplete - re-copy the stick folder, or run
+    echo Update.cmd on the bench machine to restore it.
+    echo.
+    pause
+    exit /b 1
+)
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Scripts\Invoke-Cleanup.ps1"
 pause

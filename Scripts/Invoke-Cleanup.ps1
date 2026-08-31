@@ -40,6 +40,17 @@ if (-not $script:ScriptRoot) {
     $script:ScriptRoot = (Get-Location).Path
 }
 
+# This script lives in Scripts\, but Tools\ sits beside that folder at the
+# stick root - so the checklist must print the PARENT. Getting this wrong
+# hands the tech a Tools path that does not exist, and it is pasted straight
+# into the ClamAV command, so it fails at the point of use rather than here.
+$script:StickRoot = $null
+try {
+    $script:StickRoot = Split-Path -Parent $script:ScriptRoot
+} catch { }
+# Split-Path returns empty at a drive root; fall back rather than print ''.
+if (-not $script:StickRoot) { $script:StickRoot = $script:ScriptRoot }
+
 # ---------------------------------------------------------------------------
 # Run-wide state
 # ---------------------------------------------------------------------------
@@ -1016,10 +1027,12 @@ function Show-Summary {
 # is why they are not automated.
 # ---------------------------------------------------------------------------
 function Show-Checklist {
-    # Plain concatenation, not Join-Path: Join-Path throws "Cannot find drive"
-    # if the stick has been pulled, and losing the checklist after a two-hour
-    # run because the tech unplugged early is not acceptable.
-    $toolsPath = ('' + $script:ScriptRoot).TrimEnd('\') + '\Tools'
+    # StickRoot, not ScriptRoot: this script is in Scripts\ and Tools\ is its
+    # sibling one level up. Plain concatenation, not Join-Path: Join-Path
+    # throws "Cannot find drive" if the stick has been pulled, and losing the
+    # checklist after a two-hour run because the tech unplugged early is not
+    # acceptable.
+    $toolsPath = ('' + $script:StickRoot).TrimEnd('\') + '\Tools'
     Write-Host ''
     Write-Host ('=' * 78) -ForegroundColor Yellow
     Write-Host '  MANUAL CHECKLIST - automated portion is done; work these by hand' -ForegroundColor Yellow
