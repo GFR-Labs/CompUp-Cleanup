@@ -1,0 +1,120 @@
+# CompUp Bench Cleanup
+
+PowerShell toolkit that runs on customer machines from the shop's Ventoy USB
+stick as part of the $100 cleanup service. It chains the unattended
+maintenance and scanning steps, then prints a summary the tech copies onto
+the paper work order by hand. Nothing is saved to disk on the customer
+machine except scratch files under `%TEMP%`, and nothing is ever written to
+the stick during a run.
+
+Targets: Windows 10 and Windows 11 customer machines, Windows PowerShell 5.1
+(stock). No internet assumed, no modules, no installs.
+
+## What each file does
+
+The two files a tech ever double-clicks sit at the top. Everything else is
+in `Scripts\`, out of the way.
+
+| File | Purpose |
+|------|---------|
+| `Run-Cleanup.cmd` | Double-click this on the customer machine. Elevates itself (UAC prompt), bypasses execution policy, launches the cleanup, and keeps the window open no matter what. |
+| `Update.cmd` | Double-click this on the BENCH machine to bring the stick up to the repo's current state. Self-contained: `git pull` when git exists, otherwise downloads the repo zip. Never touches `Tools\`. |
+| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and the manual checklist. |
+| `Scripts\SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
+| `.gitignore` / `.gitattributes` | Keep tool binaries and logs out of the repo; keep line endings byte-exact. |
+
+## USB folder layout
+
+```
+X:\CompUp-Cleanup\
+    Run-Cleanup.cmd          <- tech runs this on the customer machine
+    Update.cmd               <- tech runs this on the bench machine
+    README.md
+    Scripts\
+        Invoke-Cleanup.ps1
+        SOP-Cleanup.md
+    Tools\                   <- NOT in the repo; download by hand
+        ClamAV\              (clamscan.exe, freshclam.exe, db\ folder)
+        Sysinternals\        (Autoruns.exe, procexp.exe)
+        BleachBit\           (portable build)
+```
+
+`Tools\` is gitignored and sits at the stick root, NOT inside `Scripts\`.
+Each stick carries its own copies of the downloaded binaries; updates from
+the repo will never delete or overwrite them.
+
+Both launchers are inside the repo, so `Update.cmd` updates them along with
+everything else. If you ever move them outside the clone, they stop
+receiving fixes entirely - `git pull` only touches files inside the clone.
+
+Three places depend on this layout, so moving files around needs all three
+changed together: `Run-Cleanup.cmd` looks for `Scripts\Invoke-Cleanup.ps1`
+beside itself, `Update.cmd` uses that same path as its "is this really a
+cleanup stick" check, and `Invoke-Cleanup.ps1` walks one level UP from
+itself to find `Tools\` for the manual checklist.
+
+## Setting up a new stick
+
+1. Clone this repo onto the stick (or copy an existing stick's folder and
+   run the updater).
+2. Create `Tools\` and download into it: ClamAV portable (run
+   `freshclam.exe` once to build the `db\` folder), Sysinternals Autoruns
+   and Process Explorer, BleachBit portable.
+3. Test-run `Run-Cleanup.cmd` on a bench machine before first field use.
+
+## Updating a stick
+
+On the bench machine (internet required): double-click `Update.cmd`. That is
+the whole procedure - it is one self-contained file with no companion script.
+
+What it does:
+
+- Refuses to run against a folder that has no `Invoke-Cleanup.ps1` in it, so
+  a wrong path cannot unpack the repo over some unrelated directory.
+- Uses `git pull --ff-only` if git is installed and the folder is a clone.
+  Falls back to downloading the repo zip otherwise, and also if the pull is
+  refused (local edits to tracked files are the usual reason).
+- Never deletes anything. `Tools\`, local notes, and logs all survive. The
+  cost of that rule: a file removed from the repo is not removed from the
+  stick by the zip path. `git pull` does remove it.
+- Prints exactly which files changed, so "did that do anything?" has an
+  answer.
+- Verifies encoding afterwards - ASCII, CRLF, BOM on `.ps1`, no BOM on
+  `.cmd` - and says loudly not to take the stick out if a file is broken.
+
+It updates itself safely. `Update.cmd` first copies itself to `%TEMP%` and
+re-runs from there, because cmd.exe reads a batch file by seeking to a saved
+byte offset after each command: a batch file that overwrites itself mid-run
+resumes at a stale offset and executes fragments of whatever now sits there.
+
+ClamAV definitions are separate from repo updates: run
+`Tools\ClamAV\freshclam.exe` on the bench machine to refresh them before
+heading out.
+
+The updater tracks the repo's **`main`** branch. Work still sitting on a
+feature branch will not reach a stick until it is merged.
+
+## Encoding rules (do not "fix" these)
+
+Every failure below has actually happened; the rules exist for a reason.
+
+- All text files are **pure ASCII with CRLF line endings**. No box-drawing
+  characters, no em-dashes, no smart quotes.
+- `.ps1` files carry a **UTF-8 BOM**: PowerShell 5.1 reads BOM-less scripts
+  as ANSI, and one stray non-ASCII byte becomes a cascade of parse errors.
+- `.cmd` files carry **no BOM**: cmd.exe misreads a BOM as part of the
+  first command.
+- `.gitattributes` disables all git line-ending normalization (`* -text`)
+  so the bytes in the repo are the bytes on the stick, via `git pull` and
+  the zip download alike.
+
+If you edit these files, keep your editor in ASCII/UTF-8-with-BOM mode and
+CRLF line endings, and never paste from a word processor.
+
+## Where the run log lives
+
+The cleanup writes a log to the **customer machine's** `%TEMP%` (folder
+name `BenchCleanup-<timestamp>`), never to the stick - a stick that drops
+off the bus mid-run would otherwise kill the whole scan. The full chkdsk,
+DISM, and SFC output is in that log if a result needs a second look; the
+path is printed at the end of every run.

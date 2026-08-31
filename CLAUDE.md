@@ -17,11 +17,23 @@ what is on the stick.
 
 ## Deliverables
 
-1. `Invoke-Cleanup.ps1` - the main script
+1. `Scripts/Invoke-Cleanup.ps1` - the main script
 2. `Run-Cleanup.cmd` - double-click launcher
-3. `Update-FromGitHub.ps1` + `Run-Update.cmd` - refresh the stick from the repo
+3. `Update.cmd` - single self-contained file that refreshes the stick from the repo
 4. `README.md` - what each file does, USB folder layout, how to update
-5. `SOP-Cleanup.md` - the tech-facing procedure, written as numbered steps
+5. `Scripts/SOP-Cleanup.md` - the tech-facing procedure, written as numbered steps
+
+### Folder layout
+
+Only the two double-clickable launchers sit at the repo/stick root; everything else
+lives in `Scripts\`. `Tools\` and `README.md` stay at the root. Keep both launchers
+INSIDE the repo - moving them outside the clone means `git pull` can never update
+them again.
+
+Three places encode this layout and must change together: `Run-Cleanup.cmd` resolves
+`%~dp0Scripts\Invoke-Cleanup.ps1`; `Update.cmd` uses that same relative path as its
+"is this a cleanup stick" sentinel; and `Invoke-Cleanup.ps1` resolves `Tools\` from
+the PARENT of its own folder.
 
 ## Hard requirements
 
@@ -126,10 +138,16 @@ hand, because each needs human judgement. Keep it on screen until dismissed.
 
 ## Update mechanism
 
-`Update-FromGitHub.ps1` refreshes the stick. Use `git pull` when git is available, and fall
-back to downloading the repo zip and extracting over the folder when it is not - techs'
-bench machines may not have git. Preserve any local `Tools\` folder containing downloaded
-binaries; those are gitignored and must not be wiped by an update.
+`Update.cmd` refreshes the stick, as ONE self-contained double-clickable file (the
+PowerShell payload is embedded in it, below a marker line). Use `git pull` when git is
+available, and fall back to downloading the repo zip and extracting over the folder when
+it is not - techs' bench machines may not have git. Preserve any local `Tools\` folder
+containing downloaded binaries; those are gitignored and must not be wiped by an update.
+
+The updater overwrites its own file, so it must copy itself to `%TEMP%` and re-run from
+there first. cmd.exe seeks back to a saved byte offset in the batch file after each
+command instead of loading it into memory, so a batch file that replaces itself mid-run
+resumes at a stale offset and executes garbage.
 
 Add a `.gitignore` for `Tools\`, `*.log`, and any downloaded executables.
 
