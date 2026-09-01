@@ -38,6 +38,16 @@ gate, at the summary, and in the manual checklist.
 
 ## After the automated portion
 
+8b. **Space reclaimed and Windows.old.** The summary prints a single TOTAL
+    SPACE RECLAIMED figure - that is the number the customer sees value in,
+    so write it on the work order. Note that the Windows disk cleanup step
+    removes **Previous Installations**, i.e. the `Windows.old` folder. That
+    means the machine can no longer roll back its last Windows feature
+    update. This is normally what you want on a cleanup and it frees a lot
+    of space, but it is irreversible - if the customer has mentioned any
+    problem that started after a recent Windows update, raise it with the
+    service writer BEFORE running the cleanup.
+
 9. **Copy the summary block onto the paper work order by hand**: machine
    name, one line per step, findings, warnings, and the verdict line.
    Nothing is saved anywhere for you - the screen is the record.
@@ -50,13 +60,24 @@ gate, at the summary, and in the manual checklist.
 These are not printed on screen - the script ends at the summary - so work
 them from this document.
 
-11. **ClamAV**: run `Tools\ClamAV\freshclam.exe`, then scan `C:\Users`,
-    `C:\ProgramData`, `C:\Windows\Temp` with `clamscan.exe -r -i
-    --database=<stick>\Tools\ClamAV\db`. Exclude OneDrive folders (Files
-    On-Demand placeholders hydrate when scanned and download the
-    customer's entire cloud drive) and the legacy junctions `Application
-    Data`, `Local Settings`, `All Users`, `Documents and Settings` (they
-    loop forever under recursion).
+11. **ClamAV**: double-click `Scan-Clam.cmd` at the stick root. It updates
+    the definitions and then scans `C:\Users`, `C:\ProgramData` and
+    `C:\Windows\Temp`, with OneDrive and the legacy junctions already
+    excluded (OneDrive Files On-Demand placeholders hydrate when scanned
+    and download the customer's entire cloud drive; the junctions loop
+    forever under recursion).
+
+    It VERIFIES the update rather than trusting it: freshclam can exit
+    successfully while leaving the database a version behind. If the
+    update cannot be verified it retries once with a full download, and
+    only then asks you to type YES to scan on stale signatures. **Read the
+    definitions age before you type YES** - a CLEAN result from stale
+    signatures is not the assurance it looks like, and the age is printed
+    on the result block for the work order. Prefer fixing the update on
+    the bench over scanning stale.
+
+    ClamAV only reports. It removes nothing; remediate by hand and
+    re-scan.
 12. **Autoruns** (`Tools\Sysinternals\Autoruns.exe`): Options > Check
     VirusTotal, Hide Microsoft Entries. Review everything that remains;
     research anything you do not recognize before deleting it.

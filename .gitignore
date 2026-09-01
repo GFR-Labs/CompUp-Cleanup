@@ -1,0 +1,16 @@
+# Downloaded tool binaries live on each stick, never in the repo.
+# Update.cmd also skips this folder so updates cannot wipe it.
+#
+# Must stay at the repo root: a .gitignore only applies from its own
+# directory down, so a copy under Files\ does not ignore Tools\ here.
+Tools/
+
+# Run logs (the cleanup script itself only logs to %TEMP%, but keep the
+# stick clean if anything ever drops a log here).
+*.log
+
+# Downloaded executables and archives.
+*.exe
+*.dll
+*.msi
+*.zip

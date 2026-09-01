@@ -20,6 +20,7 @@ what is on the stick.
 1. `Scripts/Invoke-Cleanup.ps1` - the main script
 2. `Run-Cleanup.cmd` - double-click launcher
 3. `Update.cmd` - single self-contained file that refreshes the stick from the repo
+3b. `Scan-Clam.cmd` + `Scripts/Scan-Clam.ps1` - ClamAV update (verified) then scan
 4. `README.md` - what each file does, USB folder layout, how to update
 5. `Scripts/SOP-Cleanup.md` - the tech-facing procedure, written as numbered steps
 
@@ -30,9 +31,14 @@ lives in `Scripts\`. `Tools\` and `README.md` stay at the root. Keep both launch
 INSIDE the repo - moving them outside the clone means `git pull` can never update
 them again.
 
-Two places encode this layout and must change together: `Run-Cleanup.cmd` resolves
-`%~dp0Scripts\Invoke-Cleanup.ps1`, and `Update.cmd` uses that same relative path as
-its "is this a cleanup stick" sentinel.
+Three places encode this layout and must change together: `Run-Cleanup.cmd` resolves
+`%~dp0Scripts\Invoke-Cleanup.ps1`, `Scan-Clam.cmd` resolves `%~dp0Scripts\Scan-Clam.ps1`,
+and `Update.cmd` uses the first of those as its "is this a cleanup stick" sentinel.
+
+`.gitattributes` and `.gitignore` MUST stay at the repo root. Both only apply from
+their own directory down, so a copy under `Files\` protects `Files\` alone and leaves
+the root launchers and `Scripts\*.ps1` exposed to line-ending renormalization, which
+silently strips the CRLF and BOM the scripts depend on.
 
 ## Hard requirements
 
@@ -72,11 +78,17 @@ the run. Show a progress indicator per step and an overall "step N of M".
 | 1 | Drive health gate | `Get-PhysicalDisk`, and SMART via `Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus` | HealthStatus, OperationalStatus, PredictFailure |
 | 2 | Restore point | `Checkpoint-Computer -Description "Pre-Cleanup" -RestorePointType MODIFY_SETTINGS` | success/failure |
 | 3 | Temp cleanup | Native PowerShell delete: `%TEMP%`, `C:\Windows\Temp`, `C:\Windows\Prefetch`, recycle bin | bytes freed, files deleted |
+| 3b | Browser caches | Native delete across EVERY profile in `C:\Users`: Chrome/Edge/Brave `Cache` and `Code Cache`, Firefox `cache2`, `thumbcache_*.db`, `INetCache` | bytes freed per category |
 | 4 | Definition update | `Update-MpSignature` | signature version before/after |
 | 5 | Defender full scan | `Start-MpScan -ScanType FullScan` | detections via `Get-MpThreatDetection` filtered to this run |
 | 6 | Disk check | `chkdsk C: /scan` | errors found / clean |
 | 7 | DISM | `Dism.exe /Online /Cleanup-Image /RestoreHealth` | "restore operation completed successfully", error codes, real % progress |
-| 8 | SFC | `sfc.exe /scannow` | "did not find any integrity violations" / "successfully repaired" / "unable to fix", real % progress |
+| 8 | Component cleanup | `Dism.exe /Online /Cleanup-Image /StartComponentCleanup` | free-space delta, real % progress |
+| 9 | Windows disk cleanup | `cleanmgr /sagerun:1 /d C:` after setting `StateFlags0001` | free-space delta, elapsed time |
+| 10 | SFC | `sfc.exe /scannow` | "did not find any integrity violations" / "successfully repaired" / "unable to fix", real % progress |
+
+Numbered 1-11 at runtime: browser caches is step 4, between temp cleanup and the
+definition update. SFC runs LAST so it verifies integrity after the cleanup steps.
 
 ### Step-specific notes
 
@@ -123,11 +135,17 @@ The script must NOT print them: on screen they pushed the run past one screen an
 the summary the tech actually copies onto the work order. `Invoke-Cleanup.ps1` ends at
 the summary, findings, warnings, verdict, and the run-log path.
 
-1. **ClamAV scan** - `freshclam.exe` first, then `clamscan.exe -r -i --database=<path>`
-   against `C:\Users`, `C:\ProgramData` and `C:\Windows\Temp`. Exclude OneDrive (Files
-   On-Demand placeholders hydrate when scanned and download the customer's whole cloud
-   drive) and the legacy junctions `Application Data`, `Local Settings`, `All Users`,
-   `Documents and Settings`, which loop infinitely under recursive scanning.
+1. **ClamAV scan** - now scripted as `Scan-Clam.cmd`; the SOP step is to run it.
+   It updates then scans, with the OneDrive and legacy-junction exclusions built in.
+   **freshclam exiting 0 does not prove it downloaded anything** - it has reported the
+   database a version behind and still returned success, and a scan on stale signatures
+   that the tech believes is current is worse than no scan. So the script reads the
+   database version via `sigtool --info` before and after, treats any "behind"/"out of
+   date"/failure text as failure regardless of exit code, retries once after deleting
+   the cvd/cld files to force a full download rather than an incremental patch, and only
+   then asks the tech to type YES with the database age shown. Do NOT match freshclam's
+   "Your ClamAV installation is OUTDATED" warning as a failure - that refers to the
+   engine binary, not the signatures, and matching it makes every run demand a YES.
 2. **Autoruns** (Sysinternals GUI) - enable Check VirusTotal and Hide Microsoft Entries,
    review what remains.
 3. **Process Explorer** - VirusTotal column, review running processes.
