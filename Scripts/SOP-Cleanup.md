@@ -5,9 +5,12 @@ automated portion does the waiting for you - your judgement is needed at the
 gate, at the summary, and in the manual checklist.
 
 > **On the bench, before you head out:** double-click `Update.cmd` on the
-> stick to pull the current version, and run `Tools\ClamAV\freshclam.exe` to
-> refresh virus definitions. Both need internet, so neither can be done at
-> the customer machine.
+> stick to pull the current version. That is the only bench step - ClamAV
+> updates its own definitions at the start of every scan.
+>
+> **At the customer machine you run two files:** `Run-Cleanup.cmd` for the
+> Windows cleanup and Defender scan, then `Scan-Clam.cmd` for the ClamAV
+> scan. Nothing else needs launching.
 
 ## Before you start
 
@@ -62,22 +65,24 @@ them from this document.
 
 11. **ClamAV**: double-click `Scan-Clam.cmd` at the stick root. It updates
     the definitions and then scans `C:\Users`, `C:\ProgramData` and
-    `C:\Windows\Temp`, with OneDrive and the legacy junctions already
-    excluded (OneDrive Files On-Demand placeholders hydrate when scanned
-    and download the customer's entire cloud drive; the junctions loop
-    forever under recursion).
+    `C:\Windows\Temp`. No setup step first - it writes a `freshclam.conf`
+    if none exists, and never overwrites one that does.
 
     It VERIFIES the update rather than trusting it: freshclam can exit
-    successfully while leaving the database a version behind. If the
-    update cannot be verified it retries once with a full download, and
-    only then asks you to type YES to scan on stale signatures. **Read the
-    definitions age before you type YES** - a CLEAN result from stale
-    signatures is not the assurance it looks like, and the age is printed
-    on the result block for the work order. Prefer fixing the update on
-    the bench over scanning stale.
+    successfully while leaving the database a version behind. If the update
+    cannot be verified it retries once with a full download, and only then
+    asks you to type YES. **Read the DEFS AGE line before you type YES** - a
+    CLEAN result from stale signatures is not the assurance it looks like.
+    The age is on the result block for the work order.
 
-    ClamAV only reports. It removes nothing; remediate by hand and
-    re-scan.
+    Skipped-file counts are normal: those are locked by running processes.
+    A very large number means the scan covered less than it appears to.
+
+    ClamAV only reports - it removes nothing. Handle every FOUND file by
+    hand, then re-scan just that path:
+
+        Scan-Clam.cmd "C:\path\to\folder"
+
 12. **Autoruns** (`Tools\Sysinternals\Autoruns.exe`): Options > Check
     VirusTotal, Hide Microsoft Entries. Review everything that remains;
     research anything you do not recognize before deleting it.

@@ -42,7 +42,8 @@ X:\CompUp-Cleanup\
         Scan-Clam.ps1
         SOP-Cleanup.md
     Tools\                   <- NOT in the repo; download by hand
-        ClamAV\              (clamscan.exe, freshclam.exe, db\ folder)
+        ClamAV\              (clamscan.exe, freshclam.exe, sigtool.exe,
+                              database\ folder)
         Sysinternals\        (Autoruns.exe, procexp.exe)
         BleachBit\           (portable build)
 ```
@@ -73,9 +74,11 @@ committed.
 
 1. Clone this repo onto the stick (or copy an existing stick's folder and
    run the updater).
-2. Create `Tools\` and download into it: ClamAV portable (run
-   `freshclam.exe` once to build the `db\` folder), Sysinternals Autoruns
-   and Process Explorer, BleachBit portable.
+2. Create `Tools\` and download into it: ClamAV portable, Sysinternals
+   Autoruns and Process Explorer, BleachBit portable. ClamAV needs
+   `clamscan.exe`, `freshclam.exe` and `sigtool.exe`; the `database\`
+   folder and `freshclam.conf` are created on first run of `Scan-Clam.cmd`,
+   so there is no separate setup step.
 3. Test-run `Run-Cleanup.cmd` on a bench machine before first field use.
 
 ## Updating a stick
@@ -103,9 +106,9 @@ re-runs from there, because cmd.exe reads a batch file by seeking to a saved
 byte offset after each command: a batch file that overwrites itself mid-run
 resumes at a stale offset and executes fragments of whatever now sits there.
 
-ClamAV definitions are separate from repo updates: run
-`Tools\ClamAV\freshclam.exe` on the bench machine to refresh them before
-heading out.
+ClamAV definitions are separate from repo updates, and `Scan-Clam.cmd`
+refreshes them itself at the start of every scan - so there is nothing to
+do on the bench for ClamAV.
 
 The updater tracks the repo's **`main`** branch. Work still sitting on a
 feature branch will not reach a stick until it is merged.
