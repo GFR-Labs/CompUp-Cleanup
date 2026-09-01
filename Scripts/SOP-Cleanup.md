@@ -33,11 +33,35 @@ gate, at the summary, and in the manual checklist.
    become a drive replacement conversation BEFORE bench hours are spent.
    Only type `CONTINUE` if the service writer says to proceed; type `STOP`
    to end the run.
-7. Let the run go. The Defender full scan is the long step (often 1-3
+7. **Browser cache gate (step 4).** The run pauses if any browser is
+   running. Edge normally keeps background processes alive even with no
+   window open, so expect this on nearly every machine.
+   - `CLOSE` closes them for you. Open windows are asked to shut down
+     first, so tabs are saved and restore on next launch; only background
+     processes are force-closed.
+   - **Ask the customer first if a window has unsaved work** - a
+     half-written email in a browser tab is gone once it closes.
+   - `SKIP` moves on and leaves browser caches alone. `Enter` re-checks if
+     you would rather close them yourself.
+
+8. **Defender passive mode (step 6).** On a machine with third-party AV
+   (ESET, Norton, Avast...), Windows makes that product primary and puts
+   Defender in passive mode. Defender still scans and detects, but Windows
+   does not let it remediate in this mode, and there is no way to promote
+   it for the duration of a scan without disabling the customer's AV -
+   which we do not do. If threats are found the script asks Defender to
+   remove them anyway and checks whether that worked. If it did not, the
+   findings will tell you: remediate by hand and then either run a full
+   scan in the customer's own AV, which CAN remove, or a Microsoft
+   Defender Offline scan (checklist step 15), which runs outside Windows
+   where the third-party AV is not loaded. Do not release the machine
+   until one of those comes back clean.
+
+9. Let the run go. The Defender full scan is the long step (often 1-3
    hours); the window shows elapsed time and per-step progress. Do not
    click inside the console window while it runs.
-8. If the run stops with a red FATAL ERROR, photograph the screen (message,
-   line number) and report it - do not just rerun and hope.
+10. If the run stops with a red FATAL ERROR, photograph the screen
+    (message, line number) and report it - do not just rerun and hope.
 
 ## After the automated portion
 

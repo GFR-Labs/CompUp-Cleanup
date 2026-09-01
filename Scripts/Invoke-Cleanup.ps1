@@ -749,19 +749,36 @@ function Step-DefenderScan {
 
     # Third-party AV per Security Center. If one is active, Defender is
     # usually the passive engine.
+    $thirdParty = @()
     try {
         $avList = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct' -ErrorAction Stop)
         foreach ($av in $avList) {
             if (('' + $av.displayName) -notmatch 'Windows Defender|Microsoft Defender') {
+                $thirdParty += ('' + $av.displayName)
                 Write-Caution ('  Third-party AV present: ' + $av.displayName)
                 Add-Finding ('Third-party AV installed: ' + $av.displayName)
             }
         }
     } catch { }
+    $avName = 'the installed third-party AV'
+    if ($thirdParty.Count -gt 0) { $avName = ($thirdParty -join ' / ') }
 
     if ($passive) {
-        Write-Caution '  Defender is in PASSIVE mode: it will scan and detect but NOT remediate.'
-        Add-CustomerWarning 'Defender ran in passive mode (third-party AV owns protection). It detects but does not remove threats; a CLEAN result here is weaker than an active-mode scan.'
+        # Windows Security Center decides which engine is primary. While a
+        # third-party AV is registered, Defender stays passive and there is no
+        # supported way to promote it for the duration of a scan: the
+        # ForceDefenderPassiveMode policy only forces passive, never active,
+        # and the only thing that actually flips it is disabling or removing
+        # the other product. We will not do that to a customer's machine
+        # silently, and it would leave them unprotected if this script died
+        # mid-run. So: scan, then attempt removal explicitly and report
+        # honestly what did and did not happen.
+        Write-Caution '  Defender is in PASSIVE mode - Windows has given primary'
+        Write-Caution ('  protection to ' + $avName + '.')
+        Write-Caution '  Defender will still scan and detect. Removal is not its job'
+        Write-Caution '  in this mode, so anything found is attempted and verified'
+        Write-Caution '  rather than assumed.'
+        Add-CustomerWarning ('Defender ran in passive mode because ' + $avName + ' owns protection on this machine. It still scans and detects, but Windows does not let it remediate in this mode, so a CLEAN result here is weaker assurance than an active-mode scan.')
     }
 
     # PUA protection: READ AND REPORT ONLY. Toggling it would persistently
@@ -819,7 +836,39 @@ function Step-DefenderScan {
             Add-Finding ('Defender detected: ' + $n + '  ' + $res)
         }
         if ($passive) {
-            Add-CustomerWarning 'Threats were detected while Defender was passive - they were NOT removed. Manual remediation required.'
+            # Ask for removal anyway rather than reporting "detected, not
+            # removed" and leaving it there. Whether Defender honours this in
+            # passive mode varies by build, so the outcome is reported as
+            # attempted-and-checked, never assumed.
+            $removal = ''
+            try {
+                Remove-MpThreat -ErrorAction Stop
+                $removal = 'accepted'
+            } catch {
+                $removal = 'refused: ' + (('' + $_.Exception.Message) -replace '\s+', ' ')
+            }
+            Write-Log ('Passive-mode Remove-MpThreat: ' + $removal)
+
+            # Verify instead of trusting the call. Anything Defender still
+            # reports as active after the attempt was not remediated.
+            $stillActive = 0
+            try {
+                foreach ($t in @(Get-MpThreat -ErrorAction Stop)) {
+                    # 1 = detected and not yet dealt with. Cleaned, quarantined
+                    # and removed states are all higher.
+                    if ([int]$t.ThreatStatusID -eq 1) { $stillActive++ }
+                }
+            } catch { $stillActive = -1 }
+
+            if ($removal -eq 'accepted' -and $stillActive -eq 0) {
+                Add-Finding 'Defender was passive, but removal was accepted and no threats remain flagged as active. Confirm in Windows Security > Protection history before release.'
+                Add-CustomerWarning ('Threats were found and removal succeeded, but Defender was in passive mode under ' + $avName + '. Verify in Protection history, and run a full ' + $avName + ' scan to confirm.')
+            } else {
+                $detail = 'removal ' + $removal
+                if ($stillActive -gt 0) { $detail += '; ' + $stillActive + ' threat(s) still flagged active' }
+                Add-Finding ('Defender was passive and could NOT remediate (' + $detail + '). Remediate by hand, then EITHER run a full scan in ' + $avName + ' (it holds primary protection and can remove) OR run a Microsoft Defender Offline scan, which boots outside Windows where the third-party AV is not running and Defender can remove. Do not release until one of those comes back clean.')
+                Add-CustomerWarning ('Threats were detected but NOT removed - Defender was in passive mode under ' + $avName + '. The machine still needs remediation.')
+            }
         } else {
             Add-CustomerWarning ('Defender found and actioned ' + $dets.Count + ' threat(s). Verify quarantine in Windows Security > Protection history.')
         }
@@ -1016,26 +1065,114 @@ function Get-UserProfileDirs {
 }
 
 # Browsers must be closed or the deletes fail silently and the step reports a
-# useless zero. Never kill them - unsaved work in open tabs.
-function Wait-ForBrowsersClosed {
-    $names = @('chrome', 'msedge', 'firefox', 'brave')
-    while ($true) {
-        $running = @()
-        foreach ($n in $names) {
-            if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $running += $n }
+# useless zero.
+#
+# Edge in particular is almost always running: Windows keeps background
+# msedge processes alive for startup boost and web widgets even when nobody
+# has opened a browser, so "just close it" is not something a tech can do
+# from the taskbar. Hence the CLOSE option - but only ever after the tech
+# confirms, because open tabs may hold unsaved work.
+$script:BrowserProcessNames = @('chrome', 'msedge', 'firefox', 'brave')
+
+function Get-RunningBrowsers {
+    $found = @()
+    foreach ($n in $script:BrowserProcessNames) {
+        $procs = @(Get-Process -Name $n -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) {
+            $found += New-Object PSObject -Property @{ Name = $n; Count = $procs.Count }
         }
+    }
+    return $found
+}
+
+function Format-BrowserList {
+    param($Running)
+    return (($Running | ForEach-Object { $_.Name + ' (' + $_.Count + ')' }) -join ', ')
+}
+
+# Graceful first, force second. CloseMainWindow asks the browser to shut down
+# the way clicking the X does, so it saves its session and the customer gets
+# their tabs back on next launch; a straight kill can lose them. Background
+# processes have no main window and never respond to it, so whatever is left
+# after the grace period is force-stopped.
+function Stop-Browsers {
+    $gracefulAsked = 0
+    foreach ($n in $script:BrowserProcessNames) {
+        foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+            try {
+                if ($p.MainWindowHandle -ne 0) {
+                    [void]$p.CloseMainWindow()
+                    $gracefulAsked++
+                }
+            } catch { }
+        }
+    }
+    if ($gracefulAsked -gt 0) {
+        Write-Info ('  Asked ' + $gracefulAsked + ' browser window(s) to close and save their session...')
+        # Up to 15s for a clean shutdown; long enough for a session save, short
+        # enough that the tech is not left watching a frozen console.
+        for ($i = 0; $i -lt 30; $i++) {
+            if (@(Get-RunningBrowsers).Count -eq 0) { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
+    $forced = 0
+    foreach ($n in $script:BrowserProcessNames) {
+        foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                $forced++
+            } catch {
+                # Already gone between the enumerate and the stop, or protected.
+            }
+        }
+    }
+    if ($forced -gt 0) {
+        Write-Info ('  Force-closed ' + $forced + ' remaining process(es) (background tasks with no window).')
+    }
+    # Windows does not release the file handles the instant a process dies,
+    # and this step is all about deleting files those handles hold open.
+    Start-Sleep -Seconds 3
+    Write-Log ('Browser close: ' + $gracefulAsked + ' asked gracefully, ' + $forced + ' forced.')
+    return @(Get-RunningBrowsers)
+}
+
+function Wait-ForBrowsersClosed {
+    while ($true) {
+        $running = @(Get-RunningBrowsers)
         if ($running.Count -eq 0) { return $true }
 
         Write-Host ''
-        Write-Caution ('  These browsers are still running: ' + ($running -join ', '))
-        Write-Caution '  Their caches cannot be cleared while they are open, and the'
+        Write-Caution ('  Browsers running: ' + (Format-BrowserList $running))
+        Write-Caution '  Their caches cannot be cleared while these are open - the'
         Write-Caution '  deletes fail silently rather than erroring.'
         Write-Host ''
-        Write-Host '  Close them (save any open work first - this script will not kill'
-        Write-Host '  them for you), then press Enter to re-check.'
-        Write-Host '  Type SKIP to leave browser caches alone and move on.'
-        $answer = ('' + (Read-Host '  Enter to re-check, or SKIP')).Trim().ToUpper()
+        Write-Host '  Edge normally has background processes running even with no'
+        Write-Host '  window open, so this is expected rather than the customer'
+        Write-Host '  having left something running.'
+        Write-Host ''
+        Write-Host '    CLOSE  - close them now. Open windows are asked to shut down'
+        Write-Host '             first so tabs are saved and restored next launch;'
+        Write-Host '             only background processes get force-closed.'
+        Write-Host '    SKIP   - leave browser caches alone and move on'
+        Write-Host '    Enter  - re-check (if you would rather close them yourself)'
+        Write-Host ''
+        Write-Caution '  Check with the customer first if a window has unsaved work.'
+        $answer = ('' + (Read-Host '  CLOSE, SKIP, or Enter to re-check')).Trim().ToUpper()
+
         if ($answer -eq 'SKIP') { return $false }
+        if ($answer -eq 'CLOSE') {
+            $left = Stop-Browsers
+            if ($left.Count -eq 0) {
+                Write-Good '  All browsers closed.'
+                return $true
+            }
+            # Refused to die: usually a hung process or one held by another
+            # user session. Loop rather than plough on into silent failures.
+            Write-Caution ('  Still running after a forced close: ' + (Format-BrowserList $left))
+            Write-Caution '  Another logged-in user may have them open.'
+        }
     }
 }
 

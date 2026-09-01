@@ -99,11 +99,26 @@ definition update. SFC runs LAST so it verifies integrity after the cleanup step
   changing it persistently alters the customer's configuration. Instead, READ
   `(Get-MpPreference).PUAProtection` and report it (0 off / 1 block / 2 audit) so the tech
   knows whether the scan covered PUAs.
-- **Detect passive-mode Defender before step 5.** Read
+- **Detect passive-mode Defender before the full scan.** Read
   `(Get-MpComputerStatus).AMRunningMode` and check `root\SecurityCenter2 AntiVirusProduct`
   for third-party AV. In passive mode Defender still scans and detects but does NOT
   remediate. Report this clearly - a CLEAN result from passive Defender is not the same
   assurance as one from an active scan.
+- **Do NOT try to promote Defender to active mode for the scan.** Windows Security
+  Center decides which engine is primary; while a third-party AV is registered,
+  Defender stays passive. The `ForceDefenderPassiveMode` policy only forces passive,
+  never active, and the only thing that actually flips it is disabling or removing the
+  other product - which changes the customer's protection and would leave them exposed
+  if the script died mid-run. Instead: attempt `Remove-MpThreat` anyway, VERIFY via
+  `Get-MpThreat` whether anything is still flagged active (ThreatStatusID 1), and when
+  it did not work say so and point at the two things that do remediate - a full scan in
+  the customer's own AV, or a Microsoft Defender Offline scan, which runs outside
+  Windows where the third-party engine is not loaded.
+- **Browsers may be auto-closed, but only on confirmation.** Edge keeps background
+  processes running with no window, so the browser-cache step cannot just tell the tech
+  to close everything. Offer a CLOSE option that calls `CloseMainWindow()` first so
+  sessions are saved and tabs restore, waits, and only then force-stops what is left.
+  Never kill browsers without the tech confirming - open tabs may hold unsaved work.
 - **`chkdsk /scan`** is the online variant. It needs no reboot and must not be given `/f`
   or `/r`, which would schedule a reboot-time check.
 - **DISM emits progress with carriage returns, not newlines.** If you capture its output,
