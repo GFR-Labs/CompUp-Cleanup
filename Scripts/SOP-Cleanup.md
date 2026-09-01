@@ -5,9 +5,12 @@ automated portion does the waiting for you - your judgement is needed at the
 gate, at the summary, and in the manual checklist.
 
 > **On the bench, before you head out:** double-click `Update.cmd` on the
-> stick to pull the current version, and run `Tools\ClamAV\freshclam.exe` to
-> refresh virus definitions. Both need internet, so neither can be done at
-> the customer machine.
+> stick to pull the current version. That is the only bench step - ClamAV
+> updates its own definitions at the start of every scan.
+>
+> **At the customer machine you run two files:** `Run-Cleanup.cmd` for the
+> Windows cleanup and Defender scan, then `Scan-Clam.cmd` for the ClamAV
+> scan. Nothing else needs launching.
 
 ## Before you start
 
@@ -38,6 +41,16 @@ gate, at the summary, and in the manual checklist.
 
 ## After the automated portion
 
+8b. **Space reclaimed and Windows.old.** The summary prints a single TOTAL
+    SPACE RECLAIMED figure - that is the number the customer sees value in,
+    so write it on the work order. Note that the Windows disk cleanup step
+    removes **Previous Installations**, i.e. the `Windows.old` folder. That
+    means the machine can no longer roll back its last Windows feature
+    update. This is normally what you want on a cleanup and it frees a lot
+    of space, but it is irreversible - if the customer has mentioned any
+    problem that started after a recent Windows update, raise it with the
+    service writer BEFORE running the cleanup.
+
 9. **Copy the summary block onto the paper work order by hand**: machine
    name, one line per step, findings, warnings, and the verdict line.
    Nothing is saved anywhere for you - the screen is the record.
@@ -50,13 +63,26 @@ gate, at the summary, and in the manual checklist.
 These are not printed on screen - the script ends at the summary - so work
 them from this document.
 
-11. **ClamAV**: run `Tools\ClamAV\freshclam.exe`, then scan `C:\Users`,
-    `C:\ProgramData`, `C:\Windows\Temp` with `clamscan.exe -r -i
-    --database=<stick>\Tools\ClamAV\db`. Exclude OneDrive folders (Files
-    On-Demand placeholders hydrate when scanned and download the
-    customer's entire cloud drive) and the legacy junctions `Application
-    Data`, `Local Settings`, `All Users`, `Documents and Settings` (they
-    loop forever under recursion).
+11. **ClamAV**: double-click `Scan-Clam.cmd` at the stick root. It updates
+    the definitions and then scans `C:\Users`, `C:\ProgramData` and
+    `C:\Windows\Temp`. No setup step first - it writes a `freshclam.conf`
+    if none exists, and never overwrites one that does.
+
+    It VERIFIES the update rather than trusting it: freshclam can exit
+    successfully while leaving the database a version behind. If the update
+    cannot be verified it retries once with a full download, and only then
+    asks you to type YES. **Read the DEFS AGE line before you type YES** - a
+    CLEAN result from stale signatures is not the assurance it looks like.
+    The age is on the result block for the work order.
+
+    Skipped-file counts are normal: those are locked by running processes.
+    A very large number means the scan covered less than it appears to.
+
+    ClamAV only reports - it removes nothing. Handle every FOUND file by
+    hand, then re-scan just that path:
+
+        Scan-Clam.cmd "C:\path\to\folder"
+
 12. **Autoruns** (`Tools\Sysinternals\Autoruns.exe`): Options > Check
     VirusTotal, Hide Microsoft Entries. Review everything that remains;
     research anything you do not recognize before deleting it.

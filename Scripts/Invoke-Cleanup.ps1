@@ -52,6 +52,11 @@ $script:CustomerWarnings  = New-Object System.Collections.ArrayList
 $script:AbortRun          = $false  # set when the tech types STOP at the drive gate
 $script:DefenderAvailable = $false
 $script:WindowsText       = 'Windows (version unknown)'
+$script:TotalReclaimed    = [long]0   # headline number for the work order
+
+# Resolved once: %SystemDrive% is not guaranteed to be C: on every machine.
+$script:SystemDriveLetter = $env:SystemDrive
+if (-not $script:SystemDriveLetter) { $script:SystemDriveLetter = 'C:' }
 
 # Timeouts. Every one of these is enforced by a loop that is guaranteed to
 # come back around (see Invoke-CapturedProcess / Invoke-JobWithTimeout).
@@ -60,8 +65,10 @@ $script:FullScanTimeoutMinutes  = 300
 $script:ChkdskTimeoutMinutes    = 90
 $script:DismTimeoutMinutes      = 180
 $script:SfcTimeoutMinutes       = 120
+$script:ComponentCleanupTimeoutMinutes = 120
+$script:CleanMgrTimeoutMinutes         = 90
 
-$script:TotalSteps = 8
+$script:TotalSteps = 11
 
 # ---------------------------------------------------------------------------
 # Logging and console helpers.
@@ -141,6 +148,44 @@ function Write-Wrapped {
         $onLine = $true
     }
     if ($onLine) { Write-Host $line -ForegroundColor $Color }
+}
+
+# ---------------------------------------------------------------------------
+# Space reclaimed. The total is the headline number on the work order - it is
+# what the customer sees value in - so it is accumulated across every step
+# that frees anything.
+#
+# Two kinds of measurement feed it: byte counts of files actually deleted
+# (temp, browser caches), and free-space deltas on C: (DISM, cleanmgr) where
+# the tooling does the deleting and will not tell us how much it removed.
+# ---------------------------------------------------------------------------
+function Add-Reclaimed {
+    param([long]$Bytes)
+    if ($Bytes -gt 0) { $script:TotalReclaimed += $Bytes }
+}
+
+function Get-FreeSpaceBytes {
+    try {
+        $d = Get-PSDrive -Name $script:SystemDriveLetter.TrimEnd(':') -ErrorAction Stop
+        return [long]$d.Free
+    } catch {
+        return [long]0
+    }
+}
+
+# A free-space delta is noisy: anything else running on the machine writes to
+# C: while a step runs, so the delta can come back negative even though the
+# step reclaimed space. Report the real delta, but never let a negative one
+# subtract from the headline total.
+function Add-ReclaimedFromFreeSpace {
+    param([long]$Before, [long]$After)
+    $delta = $After - $Before
+    if ($delta -gt 0) {
+        Add-Reclaimed $delta
+        return $delta
+    }
+    Write-Log ('Free-space delta was ' + $delta + ' bytes; not counted toward the total.')
+    return [long]0
 }
 
 function Get-StatusColor {
@@ -309,6 +354,8 @@ function Invoke-CapturedProcess {
         $CR = [char]13
         $LF = [char]10
         $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+        $procStart = Get-Date
+        $sawPercent = $false   # cleanmgr prints nothing; fall back to elapsed
         $done = $false
 
         while (-not $done) {
@@ -329,6 +376,7 @@ function Invoke-CapturedProcess {
                             $line = $lineSb.ToString()
                             [void]$lineSb.Remove(0, $lineSb.Length)
                             if ($Activity -and $line -match '(\d{1,3}(?:\.\d+)?)\s*%') {
+                                $sawPercent = $true
                                 $pct = [int][math]::Min(100, [math]::Max(0, [double]$Matches[1]))
                                 Write-Progress -Id 2 -ParentId 1 -Activity $Activity `
                                     -Status $line.Trim() -PercentComplete $pct
@@ -348,6 +396,16 @@ function Invoke-CapturedProcess {
                 Write-Log ('TIMEOUT after ' + $TimeoutMinutes + 'm: ' + $FilePath)
                 $done = $true
             } elseif (-not $sawData) {
+                # A process that prints no progress at all (cleanmgr) would
+                # otherwise look identical to a hung one. Show elapsed time
+                # against the limit so the tech knows it is still alive.
+                if ($Activity -and -not $sawPercent) {
+                    try {
+                        Write-Progress -Id 2 -ParentId 1 -Activity $Activity `
+                            -Status ('Elapsed ' + (Format-Duration ((Get-Date) - $procStart)) +
+                                     ' (limit ' + $TimeoutMinutes + 'm)')
+                    } catch { }
+                }
                 Start-Sleep -Milliseconds 400
             }
         }
@@ -616,6 +674,7 @@ function Step-TempCleanup {
 
     # Headline number only on the work order; the in-use count and recycle
     # bin state go to the log, where a second look would go looking for them.
+    Add-Reclaimed $totalBytes
     Write-Log ('Temp cleanup: ' + $totalLocked + ' file(s) in use and skipped; ' + $binNote)
     return @{ Status = 'OK'; Detail = ('Freed ' + (Format-Bytes $totalBytes) + ' (' + $totalFiles + ' files)') }
 }
@@ -888,6 +947,313 @@ function Step-Sfc {
 }
 
 # ---------------------------------------------------------------------------
+# Step 4: Browser caches
+#
+# On a machine a few years old this is usually the single largest reclaimable
+# item, and it was being missed entirely. Runs over EVERY profile under
+# C:\Users, not just the tech's own login.
+#
+# The hard rule here: delete the CONTENTS of cache directories only. Never the
+# profile directory, and never a credential or history file. Wiping a
+# customer's saved logins turns a cleanup into a callback.
+# ---------------------------------------------------------------------------
+
+# Belt and braces. Nothing below should ever walk into one of these, because
+# only cache directories are ever enumerated - but a wildcard that matched
+# wrongly once would cost a customer their saved passwords, so every candidate
+# file is checked against this list before it is deleted.
+$script:NeverDeleteNames = @(
+    'cookies', 'cookies-journal', 'login data', 'login data-journal',
+    'web data', 'web data-journal', 'history', 'history-journal',
+    'bookmarks', 'bookmarks.bak', 'places.sqlite', 'places.sqlite-wal',
+    'key3.db', 'key4.db', 'logins.json', 'signons.sqlite', 'formhistory.sqlite'
+)
+
+function Test-SafeToDelete {
+    param([string]$Name)
+    return (-not ($script:NeverDeleteNames -contains $Name.ToLower()))
+}
+
+# Deletes the contents of one directory, leaving the directory itself. Returns
+# bytes actually removed.
+function Clear-DirectoryContents {
+    param([string]$Path)
+    $freed = [long]0
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $freed }
+    foreach ($f in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)) {
+        if (-not (Test-SafeToDelete $f.Name)) {
+            Write-Log ('SAFETY: refused to delete ' + $f.FullName)
+            continue
+        }
+        $len = [long]$f.Length
+        try {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+            $freed += $len
+        } catch {
+            # Locked by a running browser, or in use. Skipped, not fatal.
+        }
+    }
+    # Empty subdirectories only; the cache directory itself always survives.
+    $subs = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue) |
+        Sort-Object { $_.FullName.Length } -Descending
+    foreach ($d in $subs) {
+        try { Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop } catch { }
+    }
+    return $freed
+}
+
+# Real user profiles under C:\Users. Skips the service/template profiles and
+# anything that is a reparse point - the legacy junctions loop forever.
+function Get-UserProfileDirs {
+    $skip = @('public', 'default', 'default user', 'all users', 'defaultaccount', 'wdagutilityaccount')
+    $root = Join-Path $env:SystemDrive 'Users'
+    if (-not (Test-Path -LiteralPath $root)) { return @() }
+    return @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($skip -notcontains $_.Name.ToLower()) -and
+            -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        })
+}
+
+# Browsers must be closed or the deletes fail silently and the step reports a
+# useless zero. Never kill them - unsaved work in open tabs.
+function Wait-ForBrowsersClosed {
+    $names = @('chrome', 'msedge', 'firefox', 'brave')
+    while ($true) {
+        $running = @()
+        foreach ($n in $names) {
+            if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $running += $n }
+        }
+        if ($running.Count -eq 0) { return $true }
+
+        Write-Host ''
+        Write-Caution ('  These browsers are still running: ' + ($running -join ', '))
+        Write-Caution '  Their caches cannot be cleared while they are open, and the'
+        Write-Caution '  deletes fail silently rather than erroring.'
+        Write-Host ''
+        Write-Host '  Close them (save any open work first - this script will not kill'
+        Write-Host '  them for you), then press Enter to re-check.'
+        Write-Host '  Type SKIP to leave browser caches alone and move on.'
+        $answer = ('' + (Read-Host '  Enter to re-check, or SKIP')).Trim().ToUpper()
+        if ($answer -eq 'SKIP') { return $false }
+    }
+}
+
+function Step-BrowserCache {
+    if (-not (Wait-ForBrowsersClosed)) {
+        return @{ Status = 'SKIP'; Detail = 'Skipped by tech - browsers left open' }
+    }
+
+    # Cache directories, relative to a user profile. The '*' is a browser
+    # profile wildcard (Default, Profile 1, Profile 2...) and is enumerated -
+    # assuming Default misses every secondary profile on the machine.
+    $dirPatterns = @(
+        @{ Cat = 'Chrome';   Rel = 'AppData\Local\Google\Chrome\User Data\*\Cache' },
+        @{ Cat = 'Chrome';   Rel = 'AppData\Local\Google\Chrome\User Data\*\Code Cache' },
+        @{ Cat = 'Edge';     Rel = 'AppData\Local\Microsoft\Edge\User Data\*\Cache' },
+        @{ Cat = 'Edge';     Rel = 'AppData\Local\Microsoft\Edge\User Data\*\Code Cache' },
+        @{ Cat = 'Brave';    Rel = 'AppData\Local\BraveSoftware\Brave-Browser\User Data\*\Cache' },
+        @{ Cat = 'Firefox';  Rel = 'AppData\Roaming\Mozilla\Firefox\Profiles\*\cache2' },
+        @{ Cat = 'INetCache'; Rel = 'AppData\Local\Microsoft\Windows\INetCache' }
+    )
+    # Thumbnail caches are loose files, not a directory to empty.
+    $filePatterns = @(
+        @{ Cat = 'Thumbnails'; Rel = 'AppData\Local\Microsoft\Windows\Explorer\thumbcache_*.db' }
+    )
+
+    $byCat = @{}
+    $profiles = @(Get-UserProfileDirs)
+    Write-Info ('  Profiles to process: ' + $profiles.Count)
+
+    foreach ($prof in $profiles) {
+        Write-Info ('  ' + $prof.Name)
+        foreach ($p in $dirPatterns) {
+            # Resolve-Path expands the profile wildcard; -ErrorAction
+            # SilentlyContinue because most machines have only some browsers.
+            $matches = @(Resolve-Path -Path (Join-Path $prof.FullName $p.Rel) -ErrorAction SilentlyContinue)
+            foreach ($m in $matches) {
+                $freed = Clear-DirectoryContents -Path $m.Path
+                if ($freed -gt 0) {
+                    if (-not $byCat.ContainsKey($p.Cat)) { $byCat[$p.Cat] = [long]0 }
+                    $byCat[$p.Cat] += $freed
+                }
+            }
+        }
+        foreach ($p in $filePatterns) {
+            $matches = @(Resolve-Path -Path (Join-Path $prof.FullName $p.Rel) -ErrorAction SilentlyContinue)
+            foreach ($m in $matches) {
+                try {
+                    $item = Get-Item -LiteralPath $m.Path -Force -ErrorAction Stop
+                    if (-not (Test-SafeToDelete $item.Name)) { continue }
+                    $len = [long]$item.Length
+                    Remove-Item -LiteralPath $m.Path -Force -ErrorAction Stop
+                    if (-not $byCat.ContainsKey($p.Cat)) { $byCat[$p.Cat] = [long]0 }
+                    $byCat[$p.Cat] += $len
+                } catch { }
+            }
+        }
+    }
+
+    $total = [long]0
+    foreach ($k in $byCat.Keys) { $total += $byCat[$k] }
+    Add-Reclaimed $total
+
+    # Per-category breakdown goes to the log and the findings only if it is
+    # worth reading; the step line carries the headline number.
+    $parts = @()
+    foreach ($k in ($byCat.Keys | Sort-Object)) {
+        $parts += ($k + ' ' + (Format-Bytes $byCat[$k]))
+    }
+    if ($parts.Count -gt 0) {
+        Write-Info ('  Reclaimed: ' + ($parts -join ', '))
+        Write-Log ('Browser cache breakdown: ' + ($parts -join ', '))
+    }
+
+    if ($total -eq 0) {
+        return @{ Status = 'OK'; Detail = 'Nothing to reclaim' }
+    }
+    return @{ Status = 'OK'; Detail = ('Freed ' + (Format-Bytes $total) + ' over ' + $profiles.Count + ' profile(s)') }
+}
+
+# ---------------------------------------------------------------------------
+# Step 9: Component store cleanup
+#
+# Reclaims superseded WinSxS components - routinely 3-8 GB on a machine that
+# has been through several feature updates, often more than everything else in
+# this script combined.
+#
+# Deliberately NO /ResetBase. That makes every currently installed update
+# permanently uninstallable, which is not a decision to take silently on a
+# customer's machine.
+# ---------------------------------------------------------------------------
+function Step-ComponentCleanup {
+    $before = Get-FreeSpaceBytes
+    $r = Invoke-CapturedProcess -FilePath (Get-SystemExePath 'Dism.exe') `
+        -ArgumentString '/Online /Cleanup-Image /StartComponentCleanup' `
+        -TimeoutMinutes $script:ComponentCleanupTimeoutMinutes `
+        -Activity 'DISM component store cleanup'
+
+    Write-Log ('DISM StartComponentCleanup output follows:' + [Environment]::NewLine + $r.Output)
+    $after = Get-FreeSpaceBytes
+    $delta = Add-ReclaimedFromFreeSpace $before $after
+
+    if ($r.TimedOut) {
+        return @{ Status = 'FAIL'; Detail = 'Timed out after ' + $script:ComponentCleanupTimeoutMinutes + 'm' }
+    }
+    $out = ('' + $r.Output)
+    if ($out -match 'The operation completed successfully') {
+        return @{ Status = 'OK'; Detail = ('Reclaimed ' + (Format-Bytes $delta)) }
+    }
+    $code = ''
+    if ($out -match 'Error:\s*(0x[0-9A-Fa-f]+|\d+)') { $code = $Matches[1] }
+    elseif ($r.ExitCode -ne $null -and $r.ExitCode -ne 0) { $code = ('' + $r.ExitCode) }
+    if ($code) {
+        Add-Finding ('DISM component store cleanup did not complete cleanly (code ' + $code + '); full output is in the run log.')
+        return @{ Status = 'REVIEW'; Detail = ('Incomplete (code ' + $code + '), reclaimed ' + (Format-Bytes $delta)) }
+    }
+    return @{ Status = 'OK'; Detail = ('Reclaimed ' + (Format-Bytes $delta)) }
+}
+
+# ---------------------------------------------------------------------------
+# Step 10: Windows disk cleanup
+#
+# cleanmgr /sagerun:1 needs /sageset:1 to have been run interactively on the
+# machine first, which makes it useless unattended. So the selection is
+# configured programmatically instead: StateFlags0001 under each VolumeCaches
+# subkey, then /sagerun:1.
+#
+# The subkeys present vary by Windows version, so they are enumerated rather
+# than hardcoded. Everything not explicitly wanted is set to 0 rather than
+# just left alone: a previous /sageset on this machine could otherwise leave a
+# category enabled and have cleanmgr empty the recycle bin behind our back.
+# ---------------------------------------------------------------------------
+$script:VolumeCachesKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
+
+# Matched case-insensitively against the subkey name. 'Windows Error
+# Reporting' is a prefix match because the variants differ between versions
+# (Queue, Archive, System, Per user...).
+$script:CleanMgrWanted = @(
+    'Temporary Files',
+    'Update Cleanup',
+    'Windows Error Reporting',
+    'Delivery Optimization Files',
+    'Thumbnail Cache',
+    'Old ChkDsk Files',
+    'Device Driver Packages',
+    'Previous Installations',
+    'Temporary Setup Files'
+)
+
+# Never enabled, whatever else matches. Downloaded Program Files is excluded by
+# request; the recycle bin is excluded because step 3 already empties it
+# deliberately and a second, silent pass over user data is not wanted here.
+$script:CleanMgrNeverWanted = @(
+    'Downloaded Program Files',
+    'Recycle Bin',
+    'DownloadsFolder',
+    'User file versions'
+)
+
+function Test-CleanMgrWanted {
+    param([string]$Name)
+    foreach ($no in $script:CleanMgrNeverWanted) {
+        if ($Name -like ('*' + $no + '*')) { return $false }
+    }
+    foreach ($yes in $script:CleanMgrWanted) {
+        if ($Name -like ($yes + '*')) { return $true }
+    }
+    return $false
+}
+
+function Step-WindowsCleanup {
+    if (-not (Test-Path -LiteralPath $script:VolumeCachesKey)) {
+        return @{ Status = 'REVIEW'; Detail = 'VolumeCaches registry key not present' }
+    }
+
+    $enabled = @()
+    $disabled = 0
+    foreach ($sub in @(Get-ChildItem -LiteralPath $script:VolumeCachesKey -ErrorAction SilentlyContinue)) {
+        $name = $sub.PSChildName
+        $want = Test-CleanMgrWanted $name
+        try {
+            # StateFlags0001 pairs with /sagerun:1. It is inert for any other
+            # cleanmgr invocation, so this does not change what a manual Disk
+            # Cleanup run on this machine would do.
+            New-ItemProperty -LiteralPath $sub.PSPath -Name 'StateFlags0001' `
+                -Value $(if ($want) { 2 } else { 0 }) -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            if ($want) { $enabled += $name } else { $disabled++ }
+        } catch {
+            Write-Log ('Could not set StateFlags0001 on ' + $name + ': ' + $_.Exception.Message)
+        }
+    }
+    Write-Log ('cleanmgr categories enabled: ' + ($enabled -join ', '))
+    Write-Log ('cleanmgr categories explicitly disabled: ' + $disabled)
+    Write-Info ('  Enabled ' + $enabled.Count + ' cleanup categories, disabled ' + $disabled)
+
+    if ($enabled -contains 'Previous Installations') {
+        Add-CustomerWarning 'Windows disk cleanup removed the Windows.old rollback folder, so this machine can no longer roll back its last feature update. Normal for a cleanup, but the customer loses that option.'
+    }
+
+    $before = Get-FreeSpaceBytes
+    # cleanmgr prints no progress at all, so the runner falls back to showing
+    # elapsed time rather than a percentage.
+    $r = Invoke-CapturedProcess -FilePath (Get-SystemExePath 'cleanmgr.exe') `
+        -ArgumentString ('/sagerun:1 /d ' + $script:SystemDriveLetter) `
+        -TimeoutMinutes $script:CleanMgrTimeoutMinutes `
+        -Activity 'Windows disk cleanup'
+    $after = Get-FreeSpaceBytes
+    $delta = Add-ReclaimedFromFreeSpace $before $after
+
+    Write-Log ('cleanmgr free space before ' + (Format-Bytes $before) + ', after ' + (Format-Bytes $after))
+
+    if ($r.TimedOut) {
+        Add-Finding ('Windows disk cleanup hit the ' + $script:CleanMgrTimeoutMinutes + '-minute limit and was stopped; it may not have finished.')
+        return @{ Status = 'REVIEW'; Detail = ('Timed out, reclaimed ' + (Format-Bytes $delta)) }
+    }
+    return @{ Status = 'OK'; Detail = ('Reclaimed ' + (Format-Bytes $delta) + ' (' + $enabled.Count + ' categories)') }
+}
+
+# ---------------------------------------------------------------------------
 # Step runner. A step failure records and moves on - it never aborts the run.
 # ---------------------------------------------------------------------------
 function Invoke-Step {
@@ -974,17 +1340,22 @@ function Show-Summary {
     # Fixed columns so the table stays scannable. Detail is truncated to the
     # 78-column block: it carries the headline number only, and anything that
     # needs the full story is repeated in FINDINGS below.
-    $detailWidth = 78 - 41
+    $detailWidth = 78 - 42
     foreach ($s in $script:StepResults) {
         $detail = $s.Detail
         if ($detail.Length -gt $detailWidth) {
             $detail = $detail.Substring(0, $detailWidth - 2) + '..'
         }
-        Write-Host ('  {0} {1} ' -f $s.Number, $s.Name.PadRight(20).Substring(0, 20)) -NoNewline
+        Write-Host ('  {0} {1} ' -f ('' + $s.Number).PadLeft(2), $s.Name.PadRight(20).Substring(0, 20)) -NoNewline
         Write-Host ($s.Status.PadRight(7)) -NoNewline -ForegroundColor (Get-StatusColor $s.Status)
         Write-Host ((Format-Duration $s.Duration).PadRight(9) + $detail)
     }
 
+    Write-Host $thin
+    # The one number the customer sees value in, so it gets its own line
+    # rather than being buried in a step detail.
+    Write-Host '  TOTAL SPACE RECLAIMED: ' -NoNewline
+    Write-Host (Format-Bytes $script:TotalReclaimed) -ForegroundColor Green
     Write-Host $thin
     Write-Host '  FINDINGS:' -ForegroundColor Cyan
     if ($script:Findings.Count -eq 0) {
@@ -1052,14 +1423,19 @@ try {
         Write-Caution '  Defender cmdlets are not usable on this machine; steps 4-5 will be limited.'
     }
 
-    Invoke-Step -Number 1 -Name 'Drive health gate'  -Body { Step-DriveHealth }
-    Invoke-Step -Number 2 -Name 'Restore point'      -Body { Step-RestorePoint }
-    Invoke-Step -Number 3 -Name 'Temp cleanup'       -Body { Step-TempCleanup }
-    Invoke-Step -Number 4 -Name 'Definition update'  -Body { Step-DefinitionUpdate }
-    Invoke-Step -Number 5 -Name 'Defender full scan' -Body { Step-DefenderScan }
-    Invoke-Step -Number 6 -Name 'Disk check (online)' -Body { Step-DiskCheck }
-    Invoke-Step -Number 7 -Name 'DISM RestoreHealth' -Body { Step-Dism }
-    Invoke-Step -Number 8 -Name 'SFC /scannow'       -Body { Step-Sfc }
+    Invoke-Step -Number  1 -Name 'Drive health gate'   -Body { Step-DriveHealth }
+    Invoke-Step -Number  2 -Name 'Restore point'       -Body { Step-RestorePoint }
+    Invoke-Step -Number  3 -Name 'Temp cleanup'        -Body { Step-TempCleanup }
+    Invoke-Step -Number  4 -Name 'Browser caches'      -Body { Step-BrowserCache }
+    Invoke-Step -Number  5 -Name 'Definition update'   -Body { Step-DefinitionUpdate }
+    Invoke-Step -Number  6 -Name 'Defender full scan'  -Body { Step-DefenderScan }
+    Invoke-Step -Number  7 -Name 'Disk check (online)' -Body { Step-DiskCheck }
+    Invoke-Step -Number  8 -Name 'DISM RestoreHealth'  -Body { Step-Dism }
+    # SFC runs last so it verifies integrity AFTER the two cleanup steps have
+    # finished removing components, rather than before.
+    Invoke-Step -Number  9 -Name 'Component cleanup'   -Body { Step-ComponentCleanup }
+    Invoke-Step -Number 10 -Name 'Windows disk cleanup' -Body { Step-WindowsCleanup }
+    Invoke-Step -Number 11 -Name 'SFC /scannow'        -Body { Step-Sfc }
 
     try { Write-Progress -Id 1 -Activity 'Bench Cleanup' -Completed } catch { }
 

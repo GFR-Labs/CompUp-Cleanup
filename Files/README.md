@@ -19,7 +19,9 @@ in `Scripts\`, out of the way.
 |------|---------|
 | `Run-Cleanup.cmd` | Double-click this on the customer machine. Elevates itself (UAC prompt), bypasses execution policy, launches the cleanup, and keeps the window open no matter what. |
 | `Update.cmd` | Double-click this on the BENCH machine to bring the stick up to the repo's current state. Self-contained: `git pull` when git exists, otherwise downloads the repo zip. Never touches `Tools\`. |
-| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself: drive health gate, restore point, temp cleanup, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, SFC. Prints the work-order summary and findings. |
+| `Scan-Clam.cmd` | Double-click on the customer machine for the ClamAV step. Updates definitions, VERIFIES the update actually landed, then scans. |
+| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself, 11 steps: drive health gate, restore point, temp cleanup, browser caches, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, component store cleanup, Windows disk cleanup, SFC. Prints the work-order summary and findings. |
+| `Scripts\Scan-Clam.ps1` | The ClamAV update-and-scan logic behind `Scan-Clam.cmd`. |
 | `Scripts\SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
 | `.gitignore` / `.gitattributes` | Keep tool binaries and logs out of the repo; keep line endings byte-exact. |
 
@@ -28,13 +30,20 @@ in `Scripts\`, out of the way.
 ```
 X:\CompUp-Cleanup\
     Run-Cleanup.cmd          <- tech runs this on the customer machine
+    Scan-Clam.cmd            <- tech runs this on the customer machine
     Update.cmd               <- tech runs this on the bench machine
-    README.md
+    .gitattributes           <- must stay at root, see Encoding rules
+    .gitignore               <- must stay at root
+    Files\
+        README.md
+        CLAUDE.md
     Scripts\
         Invoke-Cleanup.ps1
+        Scan-Clam.ps1
         SOP-Cleanup.md
     Tools\                   <- NOT in the repo; download by hand
-        ClamAV\              (clamscan.exe, freshclam.exe, db\ folder)
+        ClamAV\              (clamscan.exe, freshclam.exe, sigtool.exe,
+                              database\ folder)
         Sysinternals\        (Autoruns.exe, procexp.exe)
         BleachBit\           (portable build)
 ```
@@ -47,19 +56,29 @@ Both launchers are inside the repo, so `Update.cmd` updates them along with
 everything else. If you ever move them outside the clone, they stop
 receiving fixes entirely - `git pull` only touches files inside the clone.
 
-Two places depend on this layout and must change together:
-`Run-Cleanup.cmd` looks for `Scripts\Invoke-Cleanup.ps1` beside itself, and
-`Update.cmd` uses that same path as its "is this really a cleanup stick"
-check. Nothing in the scripts resolves `Tools\` any more - the manual
-checklist that used to print its path lives in `Scripts\SOP-Cleanup.md`.
+Three places depend on this layout and must change together:
+`Run-Cleanup.cmd` looks for `Scripts\Invoke-Cleanup.ps1` beside itself,
+`Scan-Clam.cmd` looks for `Scripts\Scan-Clam.ps1`, and `Update.cmd` uses the
+first of those as its "is this really a cleanup stick" check.
+`Scan-Clam.ps1` also resolves `Tools\ClamAV\` from one level UP, since
+`Tools\` sits at the stick root.
+
+`.gitattributes` and `.gitignore` must stay at the repo ROOT. Each only
+applies from its own directory down, so a copy under `Files\` protects
+`Files\` alone and leaves the root launchers and `Scripts\*.ps1` exposed to
+git line-ending renormalization - which silently strips the CRLF and BOM the
+scripts depend on, and un-ignores `Tools\` so a tech's binaries can be
+committed.
 
 ## Setting up a new stick
 
 1. Clone this repo onto the stick (or copy an existing stick's folder and
    run the updater).
-2. Create `Tools\` and download into it: ClamAV portable (run
-   `freshclam.exe` once to build the `db\` folder), Sysinternals Autoruns
-   and Process Explorer, BleachBit portable.
+2. Create `Tools\` and download into it: ClamAV portable, Sysinternals
+   Autoruns and Process Explorer, BleachBit portable. ClamAV needs
+   `clamscan.exe`, `freshclam.exe` and `sigtool.exe`; the `database\`
+   folder and `freshclam.conf` are created on first run of `Scan-Clam.cmd`,
+   so there is no separate setup step.
 3. Test-run `Run-Cleanup.cmd` on a bench machine before first field use.
 
 ## Updating a stick
@@ -87,9 +106,9 @@ re-runs from there, because cmd.exe reads a batch file by seeking to a saved
 byte offset after each command: a batch file that overwrites itself mid-run
 resumes at a stale offset and executes fragments of whatever now sits there.
 
-ClamAV definitions are separate from repo updates: run
-`Tools\ClamAV\freshclam.exe` on the bench machine to refresh them before
-heading out.
+ClamAV definitions are separate from repo updates, and `Scan-Clam.cmd`
+refreshes them itself at the start of every scan - so there is nothing to
+do on the bench for ClamAV.
 
 The updater tracks the repo's **`main`** branch. Work still sitting on a
 feature branch will not reach a stick until it is merged.
