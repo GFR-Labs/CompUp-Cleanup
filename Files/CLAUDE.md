@@ -115,6 +115,16 @@ removing components.
   posture check is still made - once, at startup, not as a step - because the tech
   needs to know before they reach Windows Security that a passive machine will not run
   an on-demand scan until Periodic scanning is turned on.
+- **Detected files are remediated one at a time, with a Y/N per file, at the END of
+  the run.** Never use `clamscan --remove`: it deletes every hit unreviewed, and false
+  positives are the whole reason a human is in this loop. Y QUARANTINES rather than
+  deletes - the file is moved to `C:\CompUp-Quarantine\<timestamp>\` and renamed
+  `.quarantined` so it cannot be run, with a `manifest.txt` mapping it back to its
+  original path. A tech who says Y to a false positive must be able to undo it. Show
+  size, modified date, Authenticode signature and a location hint with each prompt, so
+  the decision is informed. It runs after the last step, not inside the scan step,
+  because the scan takes 20-40 minutes and a tech who walked away would otherwise
+  stall chkdsk, DISM, cleanmgr and SFC behind a prompt.
 - **Any step can be skipped mid-run: press S, then type SKIP to confirm.** Two
   deliberate actions. A single keypress would be far too easy to trigger by accident on
   steps that run for tens of minutes. The check is polled from the process runner and

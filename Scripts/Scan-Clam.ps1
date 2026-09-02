@@ -306,9 +306,7 @@ try {
         Write-Alert ('  RESULT: ' + $scan.Infected + ' INFECTED FILE(S)')
         foreach ($h in $scan.Hits) { Write-Alert ('    ' + $h.Trim()) }
         Write-Host ''
-        Write-Alert '  ClamAV does NOT remove anything. Every FOUND file must be'
-        Write-Alert '  handled by hand, then re-scan that path:'
-        Write-Alert '      Scripts\Scan-Clam.cmd "C:\path\to\folder"'
+        Write-Alert '  Nothing has been removed yet - decide file by file below.'
     } elseif ($scan.ExitCode -eq 2) {
         Write-Caution '  RESULT: completed with errors - read the scan log'
     } elseif ($staleAccepted) {
@@ -318,6 +316,15 @@ try {
     }
     Write-Host ('  Exit code ' + $scan.ExitCode + '   (0 clean / 1 infected / 2 error)')
     Write-Host $bar -ForegroundColor Cyan
+
+    if ($scan.Infected -ne $null -and $scan.Infected -gt 0 -and -not $scan.TimedOut) {
+        $rem = Invoke-ClamRemediation -Hits $scan.Hits
+        if ($rem.Quarantined -gt 0 -or $rem.Failed -gt 0) {
+            Write-Host ''
+            Write-Caution ('  Re-scan this path to confirm: Scripts\Scan-Clam.cmd "' + ($targets[0]) + '"')
+        }
+    }
+
     Write-Host '  Logs (on this machine, not the stick):' -ForegroundColor DarkGray
     Write-Host ('    ' + $script:ScanLog) -ForegroundColor DarkGray
     if ($script:LogPath) { Write-Host ('    ' + $script:LogPath) -ForegroundColor DarkGray }

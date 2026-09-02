@@ -63,6 +63,7 @@ $script:DefenderAvailable = $false
 $script:WindowsText       = 'Windows (version unknown)'
 $script:TotalReclaimed    = [long]0   # headline number for the work order
 $script:SkipRequested     = $false    # set when the tech confirms a step skip
+$script:ClamHits          = @()       # FOUND lines, remediated after the run
 
 # Resolved once: %SystemDrive% is not guaranteed to be C: on every machine.
 $script:SystemDriveLetter = $env:SystemDrive
@@ -849,9 +850,11 @@ function Step-ClamScan {
     }
     if ($scan.Infected -ne $null -and $scan.Infected -gt 0) {
         foreach ($h in $scan.Hits) { Add-Finding ('ClamAV FOUND: ' + $h.Trim()) }
-        Add-Finding 'ClamAV only reports - it removed nothing. Handle each FOUND file by hand, then re-scan that path with: Scripts\Scan-Clam.cmd "C:\path\to\folder"'
-        Add-CustomerWarning ('A second-opinion scan found ' + $scan.Infected + ' infected file(s). These were NOT removed automatically and need manual remediation.')
-        return @{ Status = 'THREAT'; Detail = ('' + $scan.Infected + ' infected - see findings') }
+        # Held for the remediation pass at the end of the run. Prompting here
+        # would stall chkdsk, DISM, cleanmgr and SFC behind a tech who walked
+        # away during a 40-minute scan.
+        $script:ClamHits = @($scan.Hits)
+        return @{ Status = 'THREAT'; Detail = ('' + $scan.Infected + ' infected - decide at the end') }
     }
     if ($scan.ExitCode -eq 2) {
         Add-Finding 'ClamAV completed with errors; the scan log is in the run folder.'
@@ -1586,6 +1589,33 @@ try {
     Invoke-Step -Number 11 -Name 'SFC /scannow'        -Body { Step-Sfc }
 
     try { Write-Progress -Id 1 -Activity 'Bench Cleanup' -Completed } catch { }
+
+    # Remediation last: every step has finished, so a tech who stepped away
+    # during the scan comes back to one interactive pass rather than a run
+    # that stalled at step 6.
+    if ($script:ClamHits.Count -gt 0 -and $script:ClamLibLoaded -and -not $script:AbortRun) {
+        try {
+            $rem = Invoke-ClamRemediation -Hits $script:ClamHits
+            if ($rem.Quarantined -gt 0) {
+                Add-Finding ('Quarantined ' + $rem.Quarantined + ' infected file(s) to ' + $rem.QuarantineDir + '. manifest.txt there maps each one back to where it came from, so a false positive can be restored.')
+                Add-CustomerWarning ('' + $rem.Quarantined + ' infected file(s) were moved to quarantine at ' + $rem.QuarantineDir + '. They are not deleted; say so if the customer misses something.')
+            }
+            if ($rem.Left -gt 0) {
+                Add-Finding ('' + $rem.Left + ' detected file(s) were reviewed and deliberately left in place.')
+            }
+            if ($rem.Failed -gt 0) {
+                Add-Finding ('' + $rem.Failed + ' file(s) could NOT be quarantined - usually locked by a running process. Remove them by hand and re-scan.')
+                Add-CustomerWarning ('' + $rem.Failed + ' infected file(s) could not be removed automatically and still need attention.')
+            }
+            if ($rem.Quarantined -gt 0 -or $rem.Failed -gt 0) {
+                Add-Finding 'Re-scan the affected folders to confirm: Scripts\Scan-Clam.cmd "C:\path\to\folder"'
+            }
+        } catch {
+            $msg = ('' + $_.Exception.Message) -replace '\s+', ' '
+            Write-Alert ('  Remediation failed: ' + $msg)
+            Add-Finding ('Remediation could not run (' + $msg + '); the detected files are listed above and still need handling by hand.')
+        }
+    }
 
     # Reboot-pending state matters to the customer handoff, so check it last.
     if (Test-PendingReboot) {

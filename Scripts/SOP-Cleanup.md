@@ -120,18 +120,42 @@ them from this document.
       own AV, or by a Defender Offline scan (the Defender Offline step below). Do not release the
       machine on a passive-mode detection you have not cleared.
 
-15. **Remediate what ClamAV found.** The summary lists every `FOUND` line.
-    ClamAV reports only; it removes nothing.
+15. **Remediate what ClamAV found** - this happens IN the run, at the very
+    end, after every step has finished. If the scan found nothing you will
+    never see it.
 
-    - Look at each file before deleting it. Check the path and the threat
-      name; research anything you do not recognise. Installers in
-      `Downloads` and cracked software are the common true positives.
-    - Remove or quarantine what is genuinely malicious.
-    - **Re-scan that folder to confirm**, rather than trusting the delete:
+    You get one file at a time, with the evidence to judge it:
+
+    - the full path and the threat name
+    - size and last-modified date
+    - **whether the file is digitally signed** - a valid signature from a
+      real publisher is the strongest sign it is a false positive
+    - a note on the location (Downloads is a common true positive; inside
+      `Windows\` or `Program Files\` means look twice)
+
+    Answer **Y** or **N**:
+
+    - **Y quarantines it.** The file is MOVED to
+      `C:\CompUp-Quarantine\<timestamp>\` and renamed `.quarantined` so it
+      cannot be run by accident. **Nothing is deleted** - `manifest.txt` in
+      that folder maps each file back to where it came from, so a false
+      positive can be restored.
+    - **N leaves it alone.**
+
+    Judge them. False positives are common: installers, game trainers,
+    keygens the customer downloaded themselves, and packed-but-legitimate
+    software all trip signatures. If dozens of hits share one signature name
+    or one folder, that is a false-positive cluster, not a riddled machine.
+
+    A file that could not be moved is almost always running or locked -
+    those are listed in the findings and still need handling by hand.
+
+    **Re-scan afterwards to confirm**, rather than trusting the move:
 
           Scripts\Scan-Clam.cmd "C:\Users\name\Downloads"
 
-    - Repeat until that path comes back clean.
+    Repeat until that path comes back clean. Tell the customer their files
+    are in quarantine, not deleted, and where.
 
 16. **Autoruns** (Sysinternals; free from Microsoft, not on the stick):
     Options > Check
