@@ -49,10 +49,23 @@ function Test-ClamAvailable {
 # Scripts\. An older layout kept it under Tools\; still honoured. Say which
 # was used rather than failing with a path the tech has to guess at.
 function Resolve-ClamRoot {
-    $roots = @(
-        (Join-Path $script:StickRoot 'ClamAV'),
-        (Join-Path (Join-Path $script:StickRoot 'Tools') 'ClamAV')
-    )
+    if (-not $script:StickRoot) {
+        throw 'ClamAV cannot be located: the host script did not set $script:StickRoot.'
+    }
+    # The stick folder itself, then one level up. A repo cloned into a
+    # subfolder of the USB (X:\CompUp-Cleanup\) with ClamAV extracted beside
+    # it at the drive root (X:\ClamAV\) is a perfectly reasonable way to
+    # build a stick, and searching only the clone would miss it.
+    $bases = @($script:StickRoot)
+    try {
+        $up = Split-Path -Parent $script:StickRoot
+        if ($up) { $bases += $up }
+    } catch { }
+    $roots = @()
+    foreach ($b in $bases) {
+        $roots += (Join-Path $b 'ClamAV')
+        $roots += (Join-Path (Join-Path $b 'Tools') 'ClamAV')
+    }
     foreach ($r in $roots) {
         if (Test-Path -LiteralPath (Join-Path $r 'clamscan.exe')) { return $r }
     }
