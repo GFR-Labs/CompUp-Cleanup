@@ -384,3 +384,182 @@ function Invoke-ClamScan {
     $res.Skipped = @($scan.StdErr -split "`r?`n" | Where-Object { $_ -match "(?i)can'?t\s+(open|access|read)" }).Count
     return $res
 }
+
+# ---------------------------------------------------------------------------
+# File-by-file remediation of what the scan found.
+#
+# clamscan has --remove, but it deletes every hit with no review, and false
+# positives are exactly why a human is in this loop: installers, keygens in a
+# customer's own archive, game trainers and packed-but-legitimate binaries all
+# trip signatures routinely. So nothing is touched without a per-file Yes.
+#
+# Yes QUARANTINES rather than deletes: the file is moved to a folder on the
+# customer's machine and renamed so it cannot be run by accident. A tech who
+# says Yes to a false positive at 5pm can put it back. A deleted file is gone,
+# and "the cleanup ate my software" is a far worse call than "it is in
+# quarantine, here is how to restore it".
+# ---------------------------------------------------------------------------
+
+# clamscan prints "<path>: <Signature.Name> FOUND". Windows paths contain
+# colons, so the split has to be on the LAST ': ' before FOUND, not the first.
+function ConvertFrom-ClamHit {
+    param([string]$Line)
+    if ($Line -match '^(?<path>.+):\s+(?<threat>\S+)\s+FOUND\s*$') {
+        return New-Object PSObject -Property @{
+            Path   = $Matches['path'].Trim()
+            Threat = $Matches['threat'].Trim()
+        }
+    }
+    return $null
+}
+
+# Evidence for the Yes/No decision. A valid Authenticode signature from a real
+# publisher is the single strongest false-positive signal a tech can see.
+function Get-HitEvidence {
+    param([string]$Path)
+    $e = New-Object PSObject -Property @{
+        Exists = $false; Size = 0; Modified = $null; Signature = 'unsigned'; Hint = ''
+    }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $e.Exists = $true
+        $e.Size = [long]$item.Length
+        $e.Modified = $item.LastWriteTime
+    } catch {
+        return $e
+    }
+    try {
+        $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+        if ($sig.Status -eq 'Valid' -and $sig.SignerCertificate) {
+            $subject = ('' + $sig.SignerCertificate.Subject)
+            $name = $subject
+            if ($subject -match 'CN=([^,]+)') { $name = $Matches[1] }
+            $e.Signature = 'SIGNED, valid: ' + $name
+        } elseif ($sig.Status -ne 'NotSigned') {
+            $e.Signature = 'signature ' + $sig.Status
+        }
+    } catch { }
+
+    $p = $Path.ToLower()
+    if ($p -match '\\downloads\\')                  { $e.Hint = 'in Downloads - a common true positive' }
+    elseif ($p -match '\\appdata\\local\\temp\\')   { $e.Hint = 'in Temp - usually safe to remove' }
+    elseif ($p -match '\\windows\\')                { $e.Hint = 'inside Windows - be careful, check this one' }
+    elseif ($p -match '\\program files')            { $e.Hint = 'inside Program Files - likely installed software' }
+    return $e
+}
+
+function Invoke-ClamRemediation {
+    param([string[]]$Hits)
+
+    $result = New-Object PSObject -Property @{
+        Quarantined = 0; Left = 0; Failed = 0; Gone = 0
+        QuarantineDir = ''; Actions = @()
+    }
+
+    # One file can be reported under more than one signature.
+    $parsed = @()
+    $seen = @{}
+    foreach ($h in $Hits) {
+        $p = ConvertFrom-ClamHit $h
+        if (-not $p) { continue }
+        $key = $p.Path.ToLower()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $parsed += $p
+    }
+    if ($parsed.Count -eq 0) { return $result }
+
+    $qdir = Join-Path (Join-Path $env:SystemDrive 'CompUp-Quarantine') (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $result.QuarantineDir = $qdir
+
+    Write-Host ''
+    Write-Host ('=' * 78) -ForegroundColor Cyan
+    Write-Host ('  REMEDIATION - ' + $parsed.Count + ' file(s) to decide on') -ForegroundColor Cyan
+    Write-Host ('=' * 78) -ForegroundColor Cyan
+    Write-Host '  Y quarantines the file: it is MOVED to' -ForegroundColor Gray
+    Write-Host ('    ' + $qdir) -ForegroundColor Gray
+    Write-Host '  and renamed so it cannot be run by accident. Nothing is deleted,' -ForegroundColor Gray
+    Write-Host '  so a false positive can be put back. N leaves the file alone.' -ForegroundColor Gray
+
+    # A big cluster of hits in one folder is usually one over-eager signature
+    # rather than a machine that is truly riddled.
+    if ($parsed.Count -gt 25) {
+        Write-Host ''
+        Write-Caution ('  ' + $parsed.Count + ' detections is a lot. Check whether they share one signature')
+        Write-Caution '  name or one folder - that pattern is usually a false-positive cluster'
+        Write-Caution '  rather than a genuinely riddled machine.'
+    }
+
+    $i = 0
+    foreach ($p in $parsed) {
+        $i++
+        $ev = Get-HitEvidence $p.Path
+
+        Write-Host ''
+        Write-Host ('  ' + ('-' * 74))
+        Write-Host ("  [{0} of {1}]  " -f $i, $parsed.Count) -NoNewline
+        Write-Host $p.Path -ForegroundColor Yellow
+        Write-Host ('    Threat   : ' + $p.Threat) -ForegroundColor Red
+        if (-not $ev.Exists) {
+            Write-Caution '    File is already gone (removed by another tool, or a temp file).'
+            $result.Gone++
+            $result.Actions += ('GONE       ' + $p.Path)
+            continue
+        }
+        Write-Host ('    Size     : ' + (Format-Bytes $ev.Size))
+        if ($ev.Modified) { Write-Host ('    Modified : ' + $ev.Modified.ToString('yyyy-MM-dd HH:mm')) }
+        if ($ev.Signature -like 'SIGNED*') {
+            Write-Host ('    ' + $ev.Signature) -ForegroundColor Green
+            Write-Host '    A valid signature makes a false positive much more likely.' -ForegroundColor Green
+        } else {
+            Write-Host ('    Signature: ' + $ev.Signature)
+        }
+        if ($ev.Hint) { Write-Host ('    Note     : ' + $ev.Hint) }
+        Write-Host ('  ' + ('-' * 74))
+
+        $answer = ''
+        while ($answer -ne 'Y' -and $answer -ne 'N') {
+            $answer = ('' + (Read-Host '  Quarantine this file?  Y / N')).Trim().ToUpper()
+        }
+        if ($answer -eq 'N') {
+            $result.Left++
+            $result.Actions += ('LEFT       ' + $p.Path + '  (' + $p.Threat + ')')
+            Write-Info '    Left in place.'
+            continue
+        }
+
+        try {
+            if (-not (Test-Path -LiteralPath $qdir)) {
+                $null = New-Item -Path $qdir -ItemType Directory -Force -ErrorAction Stop
+            }
+            # Numbered so two files with the same name cannot collide, and
+            # suffixed so a double-click in the quarantine folder does nothing.
+            $leaf = Split-Path -Leaf $p.Path
+            $dest = Join-Path $qdir (('{0:d3}_' -f $i) + $leaf + '.quarantined')
+            Move-Item -LiteralPath $p.Path -Destination $dest -Force -ErrorAction Stop
+            $result.Quarantined++
+            $result.Actions += ('QUARANTINED ' + $p.Path + '  (' + $p.Threat + ')')
+            Write-Good ('    Quarantined to ' + $dest)
+            try {
+                Add-Content -LiteralPath (Join-Path $qdir 'manifest.txt') -Encoding ASCII -ErrorAction Stop `
+                    -Value (('{0:d3}' -f $i) + ' | ' + $p.Threat + ' | ' + $p.Path)
+            } catch { }
+        } catch {
+            $result.Failed++
+            $msg = ('' + $_.Exception.Message) -replace '\s+', ' '
+            $result.Actions += ('FAILED     ' + $p.Path + '  (' + $msg + ')')
+            Write-Alert ('    Could not move it: ' + $msg)
+            Write-Alert '    Usually means it is running or locked. Note it for manual removal.'
+        }
+    }
+
+    Write-Host ''
+    Write-Host ('  Quarantined ' + $result.Quarantined + ', left ' + $result.Left +
+                ', already gone ' + $result.Gone + ', failed ' + $result.Failed)
+    if ($result.Quarantined -gt 0) {
+        Write-Host ('  Quarantine folder: ' + $qdir)
+        Write-Host '  To restore: rename the file back and move it to the path in manifest.txt.'
+    }
+    foreach ($a in $result.Actions) { Write-Log ('REMEDIATION: ' + $a) }
+    return $result
+}
