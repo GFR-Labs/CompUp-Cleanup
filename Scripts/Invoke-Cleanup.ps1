@@ -40,6 +40,15 @@ if (-not $script:ScriptRoot) {
     $script:ScriptRoot = (Get-Location).Path
 }
 
+# This script lives in Scripts\; the stick root is its parent. ClamAV.Lib.ps1
+# REQUIRES $script:StickRoot to locate ClamAV\ - without it Join-Path throws
+# on a null path, Test-ClamAvailable swallows that, and every machine reports
+# "ClamAV not on this stick" no matter where ClamAV actually is.
+$script:StickRoot = $null
+try { $script:StickRoot = Split-Path -Parent $script:ScriptRoot } catch { }
+# Split-Path returns empty at a drive root; fall back rather than pass $null.
+if (-not $script:StickRoot) { $script:StickRoot = $script:ScriptRoot }
+
 # ---------------------------------------------------------------------------
 # Run-wide state
 # ---------------------------------------------------------------------------
@@ -763,12 +772,25 @@ function Get-DefenderPosture {
 # updates itself there.
 function Step-ClamUpdate {
     $script:ClamUpdate = $null
-    if (-not (Test-ClamAvailable)) {
-        Add-Finding ('ClamAV is not on this stick - no clamscan.exe under ' + $script:StickRoot + '\ClamAV\. The virus scan did not run. Extract the portable ClamAV build there and re-run.')
-        Add-CustomerWarning 'The virus scan did not run: the scanning tool was missing from the technician stick.'
-        return @{ Status = 'REVIEW'; Detail = 'ClamAV not on this stick' }
+    if (-not $script:ClamLibLoaded) {
+        Add-Finding 'ClamAV.Lib.ps1 is missing from Scripts\, so the virus scan could not run. Run Update.cmd on the bench machine to restore the stick.'
+        Add-CustomerWarning 'The virus scan did not run: the technician stick was incomplete.'
+        return @{ Status = 'REVIEW'; Detail = 'ClamAV.Lib.ps1 missing from the stick' }
     }
-    Initialize-ClamPaths
+    # Let the real diagnostic through. Resolve-ClamRoot reports exactly which
+    # folders it looked in and what each contained; hiding that behind a
+    # boolean is what made this unfixable from the console.
+    try {
+        Initialize-ClamPaths
+    } catch {
+        $msg = ('' + $_.Exception.Message)
+        foreach ($line in ($msg -split "`r?`n")) {
+            if ($line.Trim()) { Write-Caution ('  ' + $line.TrimEnd()) }
+        }
+        Add-Finding ('ClamAV could not be used, so the virus scan did not run: ' + ($msg -replace '\s+', ' '))
+        Add-CustomerWarning 'The virus scan did not run: the scanning tool was missing or incomplete on the technician stick.'
+        return @{ Status = 'REVIEW'; Detail = 'ClamAV not usable - see findings' }
+    }
     Write-Info ('  ClamAV  : ' + $script:ClamRoot)
     Write-Info ('  Database: ' + $script:DataDir)
 
@@ -1355,12 +1377,14 @@ function Step-WindowsCleanup {
 # calls, and before any step that uses it.
 # ---------------------------------------------------------------------------
 $script:ClamLib = Join-Path $script:ScriptRoot 'ClamAV.Lib.ps1'
+$script:ClamLibLoaded = $false
 if (Test-Path -LiteralPath $script:ClamLib) {
     . $script:ClamLib
+    $script:ClamLibLoaded = $true
 } else {
     # Missing library is not fatal: every other step still runs, and the
-    # ClamAV step reports itself as skipped.
-    function Test-ClamAvailable { return $false }
+    # ClamAV steps report themselves as unusable.
+    Write-Caution ('  ClamAV.Lib.ps1 not found at ' + $script:ClamLib + '; the virus scan will be skipped.')
 }
 
 # ---------------------------------------------------------------------------
