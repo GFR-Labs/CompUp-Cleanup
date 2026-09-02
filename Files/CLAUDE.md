@@ -20,20 +20,25 @@ what is on the stick.
 1. `Scripts/Invoke-Cleanup.ps1` - the main script
 2. `Run-Cleanup.cmd` - double-click launcher
 3. `Update.cmd` - single self-contained file that refreshes the stick from the repo
-3b. `Scan-Clam.cmd` + `Scripts/Scan-Clam.ps1` - ClamAV update (verified) then scan
+3b. `Scripts/Scan-Clam.cmd` + `Scripts/Scan-Clam.ps1` - standalone ClamAV re-scan of one
+    path, for use after remediating what the cleanup run found. NOT a standard-job file,
+    which is why it is not at the root.
 4. `README.md` - what each file does, USB folder layout, how to update
 5. `Scripts/SOP-Cleanup.md` - the tech-facing procedure, written as numbered steps
 
 ### Folder layout
 
 Only the two double-clickable launchers sit at the repo/stick root; everything else
-lives in `Scripts\`. `Tools\` and `README.md` stay at the root. Keep both launchers
-INSIDE the repo - moving them outside the clone means `git pull` can never update
-them again.
+lives in `Scripts\`, and the docs in `Files\`. The extracted ClamAV build lives in
+`ClamAV\` at the stick root, OUTSIDE the repo and gitignored - it is the only thing on
+a stick that is not in the repo. Keep both launchers INSIDE the repo - moving them
+outside the clone means `git pull` can never update them again.
 
 Three places encode this layout and must change together: `Run-Cleanup.cmd` resolves
-`%~dp0Scripts\Invoke-Cleanup.ps1`, `Scan-Clam.cmd` resolves `%~dp0Scripts\Scan-Clam.ps1`,
-and `Update.cmd` uses the first of those as its "is this a cleanup stick" sentinel.
+`%~dp0Scripts\Invoke-Cleanup.ps1`, `Scripts\Scan-Clam.cmd` resolves `%~dp0Scan-Clam.ps1`
+(both are in `Scripts\`), and `Update.cmd` uses the first of those as its "is this a
+cleanup stick" sentinel. Only the two launchers a tech runs on a normal job -
+`Run-Cleanup.cmd` and `Update.cmd` - belong at the root.
 
 `.gitattributes` and `.gitignore` MUST stay at the repo root. Both only apply from
 their own directory down, so a copy under `Files\` protects `Files\` alone and leaves
@@ -78,17 +83,17 @@ the run. Show a progress indicator per step and an overall "step N of M".
 | 1 | Drive health gate | `Get-PhysicalDisk`, and SMART via `Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus` | HealthStatus, OperationalStatus, PredictFailure |
 | 2 | Restore point | `Checkpoint-Computer -Description "Pre-Cleanup" -RestorePointType MODIFY_SETTINGS` | success/failure |
 | 3 | Temp cleanup | Native PowerShell delete: `%TEMP%`, `C:\Windows\Temp`, `C:\Windows\Prefetch`, recycle bin | bytes freed, files deleted |
-| 3b | Browser caches | Native delete across EVERY profile in `C:\Users`: Chrome/Edge/Brave `Cache` and `Code Cache`, Firefox `cache2`, `thumbcache_*.db`, `INetCache` | bytes freed per category |
-| 4 | Definition update | `Update-MpSignature` | signature version before/after |
-| 5 | Defender full scan | `Start-MpScan -ScanType FullScan` | detections via `Get-MpThreatDetection` filtered to this run |
-| 6 | Disk check | `chkdsk C: /scan` | errors found / clean |
-| 7 | DISM | `Dism.exe /Online /Cleanup-Image /RestoreHealth` | "restore operation completed successfully", error codes, real % progress |
-| 8 | Component cleanup | `Dism.exe /Online /Cleanup-Image /StartComponentCleanup` | free-space delta, real % progress |
-| 9 | Windows disk cleanup | `cleanmgr /sagerun:1 /d C:` after setting `StateFlags0001` | free-space delta, elapsed time |
-| 10 | SFC | `sfc.exe /scannow` | "did not find any integrity violations" / "successfully repaired" / "unable to fix", real % progress |
+| 4 | Browser caches | Native delete across EVERY profile in `C:\Users`: Chrome/Edge/Brave `Cache` and `Code Cache`, Firefox `cache2`, `thumbcache_*.db`, `INetCache` | bytes freed per category |
+| 5 | Defender definitions | `Update-MpSignature`, plus a READ-ONLY posture check (AMRunningMode, PUA, third-party AV) | version before/after, passive mode |
+| 6 | ClamAV scan | `Scripts/ClamAV.Lib.ps1`: verified freshclam update, then clamscan | infected count, FOUND lines, defs age |
+| 7 | Disk check | `chkdsk C: /scan` | errors found / clean |
+| 8 | DISM | `Dism.exe /Online /Cleanup-Image /RestoreHealth` | "restore operation completed successfully", error codes, real % progress |
+| 9 | Component cleanup | `Dism.exe /Online /Cleanup-Image /StartComponentCleanup` | free-space delta, real % progress |
+| 10 | Windows disk cleanup | `cleanmgr /sagerun:1 /d C:` after setting `StateFlags0001` | free-space delta, elapsed time |
+| 11 | SFC | `sfc.exe /scannow` | "did not find any integrity violations" / "successfully repaired" / "unable to fix", real % progress |
 
-Numbered 1-11 at runtime: browser caches is step 4, between temp cleanup and the
-definition update. SFC runs LAST so it verifies integrity after the cleanup steps.
+SFC runs LAST so it verifies integrity after the cleanup steps have finished
+removing components.
 
 ### Step-specific notes
 
@@ -99,11 +104,52 @@ definition update. SFC runs LAST so it verifies integrity after the cleanup step
   changing it persistently alters the customer's configuration. Instead, READ
   `(Get-MpPreference).PUAProtection` and report it (0 off / 1 block / 2 audit) so the tech
   knows whether the scan covered PUAs.
-- **Detect passive-mode Defender before step 5.** Read
+- **Detect passive-mode Defender before the full scan.** Read
   `(Get-MpComputerStatus).AMRunningMode` and check `root\SecurityCenter2 AntiVirusProduct`
   for third-party AV. In passive mode Defender still scans and detects but does NOT
   remediate. Report this clearly - a CLEAN result from passive Defender is not the same
   assurance as one from an active scan.
+- **The Defender FULL SCAN is manual, in the SOP - do not automate it again.** It ran
+  one to three hours emitting nothing, so a slow scan and a hung one were
+  indistinguishable and techs killed healthy runs. Driven by hand from Windows
+  Security the tech gets a live file count. The script still updates Defender's
+  definitions, so the manual scan starts current, and still reports passive mode and
+  PUA state so the tech knows what to expect. ClamAV is the automated scan instead: a
+  different engine, visible per-file progress, unaffected by Defender being passive.
+- **ClamAV logic lives in `Scripts/ClamAV.Lib.ps1`, dot-sourced by BOTH**
+  `Invoke-Cleanup.ps1` (the scan step) and `Scan-Clam.ps1` (targeted re-scan after
+  remediation). Never duplicate it into one of them - they must not drift.
+- **Do NOT try to promote Defender to active mode for the scan.** Windows Security
+  Center decides which engine is primary; while a third-party AV is registered,
+  Defender stays passive. The `ForceDefenderPassiveMode` policy only forces passive,
+  never active, and the only thing that actually flips it is disabling or removing the
+  other product - which changes the customer's protection and would leave them exposed
+  if the script died mid-run. Instead: attempt `Remove-MpThreat` anyway, VERIFY via
+  `Get-MpThreat` whether anything is still flagged active (ThreatStatusID 1), and when
+  it did not work say so and point at the two things that do remediate - a full scan in
+  the customer's own AV, or a Microsoft Defender Offline scan, which runs outside
+  Windows where the third-party engine is not loaded.
+- **Browsers may be auto-closed, but only on confirmation.** Edge keeps background
+  processes running with no window, so the browser-cache step cannot just tell the tech
+  to close everything. Offer a CLOSE option that calls `CloseMainWindow()` first so
+  sessions are saved and tabs restore, waits, and only then force-stops what is left.
+  Never kill browsers without the tech confirming - open tabs may hold unsaved work.
+- **ClamAV: freshclam exiting 0 does not prove it downloaded anything.** It has
+  reported the database a version behind and still returned success, and a scan on
+  stale signatures that the tech believes is current is worse than no scan. So the
+  library reads the database version via `sigtool --info` before and after (both
+  `daily.cvd` and `daily.cld` - freshclam produces either), treats any "behind" /
+  "out of date" / failure text as failure regardless of exit code, retries once after
+  deleting the cvd/cld files to force a full download rather than an incremental
+  patch, and only then asks the tech to type YES with the database age shown. Do NOT
+  match freshclam's "Your ClamAV installation is OUTDATED" warning as a failure - that
+  refers to the engine binary, not the signatures, and matching it makes every run
+  demand a YES.
+- **ClamAV's scan flags and exclusions are the shop's tuned set** - `--max-filesize`,
+  `--max-scansize`, `--max-scantime`, `--cross-fs=no`, both `--follow-*-symlinks=0`,
+  stderr kept separate and locked-file warnings counted, and `--exclude-dir` patterns
+  WITHOUT `$` anchors (anchored, clamscan still descends into the directory). Do not
+  simplify them.
 - **`chkdsk /scan`** is the online variant. It needs no reboot and must not be given `/f`
   or `/r`, which would schedule a reboot-time check.
 - **DISM emits progress with carriage returns, not newlines.** If you capture its output,
@@ -135,42 +181,39 @@ The script must NOT print them: on screen they pushed the run past one screen an
 the summary the tech actually copies onto the work order. `Invoke-Cleanup.ps1` ends at
 the summary, findings, warnings, verdict, and the run-log path.
 
-1. **ClamAV scan** - now scripted as `Scan-Clam.cmd`; the SOP step is to run it.
-   It updates then scans, with the OneDrive and legacy-junction exclusions built in.
-   **freshclam exiting 0 does not prove it downloaded anything** - it has reported the
-   database a version behind and still returned success, and a scan on stale signatures
-   that the tech believes is current is worse than no scan. So the script reads the
-   database version via `sigtool --info` before and after, treats any "behind"/"out of
-   date"/failure text as failure regardless of exit code, retries once after deleting
-   the cvd/cld files to force a full download rather than an incremental patch, and only
-   then asks the tech to type YES with the database age shown. Do NOT match freshclam's
-   "Your ClamAV installation is OUTDATED" warning as a failure - that refers to the
-   engine binary, not the signatures, and matching it makes every run demand a YES.
-2. **Autoruns** (Sysinternals GUI) - enable Check VirusTotal and Hide Microsoft Entries,
+1. **Defender full scan (manual)** - Windows Security > Virus and threat protection >
+   Full scan. If the run reported Defender as PASSIVE, first turn on Microsoft Defender
+   Antivirus options > Periodic scanning, or Defender will not scan on demand. That is
+   a persistent change to the customer's machine; note it on the work order. In passive
+   mode Defender detects but cannot remove.
+2. **Remediate what ClamAV found** - it reports only. Judge each FOUND line (false
+   positives are common), remove what is genuinely malicious, then re-scan that one
+   path with `Scripts/Scan-Clam.cmd "C:\path"` to confirm.
+3. **Autoruns** (Sysinternals GUI) - enable Check VirusTotal and Hide Microsoft Entries,
    review what remains.
-3. **Process Explorer** - VirusTotal column, review running processes.
-4. **BleachBit** (portable) - browser cache and temp only. Never cookies, passwords or
+4. **Process Explorer** - VirusTotal column, review running processes.
+5. **BleachBit** (portable) - browser cache and temp only. Never cookies, passwords or
    history; wiping a customer's logged-in sessions turns a cleanup into a callback.
-5. **Defender Offline scan** - Windows Security > Scan options > Microsoft Defender
+6. **Defender Offline scan** - Windows Security > Scan options > Microsoft Defender
    Antivirus (offline scan). Reboots, ~15 min. Only step that inspects the disk with
    malware not running.
-6. **Browser extension review** - all installed browsers.
-7. **Reboot and confirm** the machine is stable before release.
+7. **Browser extension review** - all installed browsers.
+8. **Reboot and confirm** the machine is stable before release.
 
 ## Update mechanism
 
 `Update.cmd` refreshes the stick, as ONE self-contained double-clickable file (the
 PowerShell payload is embedded in it, below a marker line). Use `git pull` when git is
 available, and fall back to downloading the repo zip and extracting over the folder when
-it is not - techs' bench machines may not have git. Preserve any local `Tools\` folder
-containing downloaded binaries; those are gitignored and must not be wiped by an update.
+it is not - techs' bench machines may not have git. Preserve the local `ClamAV\`
+folder (and any older `Tools\`); it is gitignored and must not be wiped by an update.
 
 The updater overwrites its own file, so it must copy itself to `%TEMP%` and re-run from
 there first. cmd.exe seeks back to a saved byte offset in the batch file after each
 command instead of loading it into memory, so a batch file that replaces itself mid-run
 resumes at a stale offset and executes garbage.
 
-Add a `.gitignore` for `Tools\`, `*.log`, and any downloaded executables.
+Add a `.gitignore` for `ClamAV\`, `Tools\`, `*.log`, and any downloaded executables.
 
 ## Style
 

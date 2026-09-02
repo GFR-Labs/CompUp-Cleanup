@@ -2,13 +2,17 @@
 rem =====================================================================
 rem Scan-Clam.cmd - ClamAV: update signatures (verified), then scan.
 rem
-rem Usage:  Scan-Clam.cmd                 scans the standard target set
-rem         Scan-Clam.cmd "C:\Some\Path"  scans one path instead
+rem Usage:  Scripts\Scan-Clam.cmd                 standard target set
+rem         Scripts\Scan-Clam.cmd "C:\Some\Path"   one path instead
 rem
-rem Run this on the customer machine. It elevates (needed to read every
-rem user profile) and bypasses execution policy. The trailing "pause"
-rem keeps the window open even if the .ps1 dies on a parse error before
-rem its own try/finally can run.
+rem This lives in Scripts\ rather than the stick root because it is NOT
+rem part of a normal job - Run-Cleanup.cmd already runs a ClamAV scan as
+rem one of its steps. This is the re-scan tool: after you remove something
+rem the cleanup found, point this at that folder to confirm it is gone.
+rem
+rem It elevates (needed to read every user profile) and bypasses execution
+rem policy. The trailing "pause" keeps the window open even if the .ps1
+rem dies on a parse error before its own try/finally can run.
 rem
 rem No Setup step is needed: if freshclam.conf is missing the script
 rem writes a minimal one. An existing conf is never overwritten.
@@ -33,9 +37,10 @@ if "%~1"=="" (
 exit /b
 
 :run
-if not exist "%~dp0Scripts\Scan-Clam.ps1" (
+rem Both files are in Scripts\ now, so this resolves beside itself.
+if not exist "%~dp0Scan-Clam.ps1" (
     echo.
-    echo Cannot find Scripts\Scan-Clam.ps1 next to this launcher.
+    echo Cannot find Scan-Clam.ps1 next to this launcher.
     echo This folder is incomplete - re-copy the stick folder, or run
     echo Update.cmd on the bench machine to restore it.
     echo.
@@ -43,5 +48,5 @@ if not exist "%~dp0Scripts\Scan-Clam.ps1" (
     exit /b 1
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Scripts\Scan-Clam.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Scan-Clam.ps1" %*
 pause

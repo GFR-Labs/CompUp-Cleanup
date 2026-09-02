@@ -61,12 +61,15 @@ if (-not $script:SystemDriveLetter) { $script:SystemDriveLetter = 'C:' }
 # Timeouts. Every one of these is enforced by a loop that is guaranteed to
 # come back around (see Invoke-CapturedProcess / Invoke-JobWithTimeout).
 $script:SigUpdateTimeoutMinutes = 15
-$script:FullScanTimeoutMinutes  = 300
 $script:ChkdskTimeoutMinutes    = 90
 $script:DismTimeoutMinutes      = 180
 $script:SfcTimeoutMinutes       = 120
 $script:ComponentCleanupTimeoutMinutes = 120
 $script:CleanMgrTimeoutMinutes         = 90
+# Shorter than Scripts\Scan-Clam.cmd's standalone 240: in the chain a stuck scan
+# holds up every step behind it, and 20-40 minutes is the normal range.
+$script:ClamScanTimeoutMinutes         = 120
+$script:FreshclamTimeoutMinutes        = 30
 
 $script:TotalSteps = 11
 
@@ -682,6 +685,58 @@ function Step-TempCleanup {
 # ---------------------------------------------------------------------------
 # Step 4: Defender definition update
 # ---------------------------------------------------------------------------
+# Reads how Defender is configured, so the summary can tell the tech what to
+# expect from the manual scan. READ ONLY - PUA protection and the passive/
+# active decision are the customer's configuration and are never changed.
+function Get-DefenderPosture {
+    $out = @{ Status = 'OK'; Suffix = '' }
+    if (-not $script:DefenderAvailable) { return $out }
+
+    $thirdParty = @()
+    try {
+        foreach ($av in @(Get-CimInstance -Namespace 'root\SecurityCenter2' `
+                -ClassName 'AntiVirusProduct' -ErrorAction Stop)) {
+            if (('' + $av.displayName) -notmatch 'Windows Defender|Microsoft Defender') {
+                $thirdParty += ('' + $av.displayName)
+            }
+        }
+    } catch { }
+
+    $mode = ''
+    try { $mode = ('' + (Get-MpComputerStatus -ErrorAction Stop).AMRunningMode) } catch { }
+    if ($mode) { Write-Info ('  Defender running mode: ' + $mode) }
+
+    # PUA state changes what a manual scan will and will not flag.
+    try {
+        $pua = [int](Get-MpPreference -ErrorAction Stop).PUAProtection
+        if ($pua -eq 0) {
+            Write-Caution '  PUA protection is OFF on this machine.'
+            Add-Finding 'PUA protection is off, so the manual Defender scan will not flag potentially unwanted applications. Do not change the setting; note it for the customer.'
+        }
+    } catch { }
+
+    if ($thirdParty.Count -gt 0) {
+        $names = ($thirdParty -join ' / ')
+        Write-Caution ('  Third-party AV present: ' + $names)
+        Add-Finding ('Third-party AV installed: ' + $names)
+    }
+
+    if ($mode -match 'Passive') {
+        $names = 'a third-party AV'
+        if ($thirdParty.Count -gt 0) { $names = ($thirdParty -join ' / ') }
+        Write-Caution '  Defender is PASSIVE. For the manual full scan you must first turn on'
+        Write-Caution '  Windows Security > Virus and threat protection > Microsoft Defender'
+        Write-Caution '  Antivirus options > Periodic scanning.'
+        Add-Finding ('Defender is in passive mode because ' + $names + ' holds primary protection. Turn on Periodic scanning in Windows Security before the manual full scan, or Defender will not scan on demand. Remember Defender cannot remediate in passive mode: remove anything it finds by hand, or use a Defender Offline scan.')
+        $out.Status = 'REVIEW'
+        $out.Suffix = ' - PASSIVE'
+    }
+    return $out
+}
+
+# Kept even though the Defender SCAN is now manual: it takes about a minute
+# and means the tech's manual full scan starts with current signatures
+# instead of downloading them first while they wait.
 function Step-DefinitionUpdate {
     if (-not $script:DefenderAvailable) {
         return @{ Status = 'REVIEW'; Detail = 'Defender cmdlets not available on this machine' }
@@ -723,115 +778,87 @@ function Step-DefinitionUpdate {
         Write-Log ('Update-MpSignature error: ' + ('' + $r.Errors[0]))
         return @{ Status = 'REVIEW'; Detail = 'No update (offline?); using ' + $after + $ageNote }
     }
+    # Posture for the MANUAL scan that follows. Read-only: nothing here
+    # changes the customer's configuration. This used to live in the
+    # automated scan step; it matters more now, because the tech is about to
+    # drive Defender by hand and needs to know what they are walking into.
+    $posture = Get-DefenderPosture
+
     if ($after -ne $before) {
-        return @{ Status = 'OK'; Detail = $before + ' -> ' + $after }
+        return @{ Status = $posture.Status; Detail = $before + ' -> ' + $after + $posture.Suffix }
     }
-    return @{ Status = 'OK'; Detail = 'Current: ' + $after + $ageNote }
+    return @{ Status = $posture.Status; Detail = 'Current: ' + $after + $ageNote + $posture.Suffix }
 }
 
 # ---------------------------------------------------------------------------
-# Step 5: Defender full scan
+# ClamAV: update the signatures, verify the update landed, then scan.
+#
+# This replaced the automated Defender full scan, which took one to three
+# hours and gave no sign of life while it ran, so a slow scan and a hung one
+# looked identical. Defender is now a manual step in the SOP, where Windows
+# Security shows real progress. ClamAV runs here instead: it is a second
+# opinion from a different engine, it prints per-file output so it visibly
+# progresses, and it is unaffected by whether Defender is passive.
+#
+# The scan runs AFTER the temp and browser cleanup steps deliberately - there
+# is no point scanning files that are about to be deleted, and on a neglected
+# machine that removes a lot of scan surface.
 # ---------------------------------------------------------------------------
-function Step-DefenderScan {
-    if (-not $script:DefenderAvailable) {
-        return @{ Status = 'REVIEW'; Detail = 'Defender cmdlets not available - scan skipped' }
+function Step-ClamScan {
+    if (-not (Test-ClamAvailable)) {
+        Add-Finding 'ClamAV is not on this stick (Tools\ClamAV\clamscan.exe missing), so the second-opinion scan did not run. Rebuild the stick before the next job.'
+        return @{ Status = 'REVIEW'; Detail = 'ClamAV not on this stick - skipped' }
+    }
+    Initialize-ClamPaths
+    Write-Info ('  Database: ' + $script:DataDir)
+
+    $upd = Invoke-ClamUpdateVerified -Interactive $true
+    $db = $upd.Db
+    $ageText = 'age unknown'
+    if ($db -and $db.AgeDays -ne $null) { $ageText = ('' + $db.AgeDays + 'd old') }
+
+    if ($upd.Aborted) {
+        Add-Finding 'ClamAV definitions could not be updated and the tech declined to scan on stale signatures, so no ClamAV scan was run.'
+        Add-CustomerWarning 'The second-opinion virus scan did not run because its definitions could not be updated.'
+        return @{ Status = 'SKIP'; Detail = 'Update failed, scan declined' }
+    }
+    if ($upd.StaleAccepted) {
+        Add-Finding ('ClamAV scanned on STALE signatures (' + $ageText + '): the update could not be verified. A clean result here is weak assurance.')
     }
 
-    # --- Pre-scan posture checks (read-only; never change customer config) ---
-    $passive = $false
-    $modeText = 'unknown'
-    try {
-        $st = Get-MpComputerStatus -ErrorAction Stop
-        $modeText = ('' + $st.AMRunningMode)
-        if ($modeText -match 'Passive') { $passive = $true }
-    } catch { }
-    Write-Info ('  Defender running mode: ' + $modeText)
+    $targets = @(
+        (Join-Path $env:SystemDrive 'Users'),
+        (Join-Path $env:SystemDrive 'ProgramData'),
+        (Join-Path $env:SystemRoot 'Temp')
+    )
+    $scanLog = Join-Path $script:WorkDir 'clamscan.log'
+    Write-Info ('  Scanning ' + ($targets -join ', '))
+    Write-Info ('  Only infected files are printed; limit ' + $script:ClamScanTimeoutMinutes + ' minutes.')
 
-    # Third-party AV per Security Center. If one is active, Defender is
-    # usually the passive engine.
-    try {
-        $avList = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct' -ErrorAction Stop)
-        foreach ($av in $avList) {
-            if (('' + $av.displayName) -notmatch 'Windows Defender|Microsoft Defender') {
-                Write-Caution ('  Third-party AV present: ' + $av.displayName)
-                Add-Finding ('Third-party AV installed: ' + $av.displayName)
-            }
-        }
-    } catch { }
+    $scan = Invoke-ClamScan -Targets $targets -ScanLogPath $scanLog `
+        -TimeoutMinutes $script:ClamScanTimeoutMinutes
 
-    if ($passive) {
-        Write-Caution '  Defender is in PASSIVE mode: it will scan and detect but NOT remediate.'
-        Add-CustomerWarning 'Defender ran in passive mode (third-party AV owns protection). It detects but does not remove threats; a CLEAN result here is weaker than an active-mode scan.'
+    if ($scan.Skipped -gt 0) {
+        Write-Log ('clamscan skipped ' + $scan.Skipped + ' unreadable file(s) - locked by running processes.')
     }
-
-    # PUA protection: READ AND REPORT ONLY. Toggling it would persistently
-    # change the customer's configuration, which we never do.
-    $puaNote = ''
-    $puaShort = ''
-    try {
-        $pua = [int](Get-MpPreference -ErrorAction Stop).PUAProtection
-        switch ($pua) {
-            0 { $puaNote = 'PUA protection OFF';       $puaShort = 'PUA off' }
-            1 { $puaNote = 'PUA protection ON (block)'; $puaShort = 'PUA block' }
-            2 { $puaNote = 'PUA protection AUDIT';      $puaShort = 'PUA audit' }
-            default { $puaNote = 'PUA protection value ' + $pua; $puaShort = 'PUA ' + $pua }
-        }
-        Write-Info ('  ' + $puaNote)
-        if ($pua -eq 0) {
-            Add-Finding 'PUA protection is off on this machine: the scan did not cover potentially unwanted applications. Do not change the setting; note it for the customer.'
-        }
-    } catch { }
-
-    Write-Info ('  Starting full scan. This is the long step; limit ' + $script:FullScanTimeoutMinutes + ' minutes.')
-    $scanStart = Get-Date
-    $r = Invoke-JobWithTimeout -Body { Start-MpScan -ScanType FullScan -ErrorAction Stop } `
-        -TimeoutMinutes $script:FullScanTimeoutMinutes -Activity 'Defender full scan'
-
-    if ($r.TimedOut) {
-        Add-Finding ('Defender full scan hit the ' + $script:FullScanTimeoutMinutes + '-minute limit and was stopped; result is incomplete.')
+    if ($scan.TimedOut) {
+        Add-Finding ('ClamAV scan hit the ' + $script:ClamScanTimeoutMinutes + '-minute limit and was stopped; the result is incomplete.')
         return @{ Status = 'FAIL'; Detail = 'Timed out - INCOMPLETE' }
     }
-    if ($r.Errors.Count -gt 0) {
-        $msg = ('' + $r.Errors[0]) -replace '\s+', ' '
-        Add-Finding ('Defender full scan failed: ' + $msg)
-        return @{ Status = 'FAIL'; Detail = 'Scan failed - see findings' }
+    if ($scan.Infected -ne $null -and $scan.Infected -gt 0) {
+        foreach ($h in $scan.Hits) { Add-Finding ('ClamAV FOUND: ' + $h.Trim()) }
+        Add-Finding 'ClamAV only reports - it removed nothing. Handle each FOUND file by hand, then re-scan that path with: Scripts\Scan-Clam.cmd "C:\path\to\folder"'
+        Add-CustomerWarning ('A second-opinion scan found ' + $scan.Infected + ' infected file(s). These were NOT removed automatically and need manual remediation.')
+        return @{ Status = 'THREAT'; Detail = ('' + $scan.Infected + ' infected - see findings') }
     }
-
-    # Detections from THIS run only, filtered by time.
-    $dets = @()
-    try {
-        $dets = @(Get-MpThreatDetection -ErrorAction Stop |
-            Where-Object { $_.InitialDetectionTime -ge $scanStart })
-    } catch { }
-
-    if ($dets.Count -gt 0) {
-        $names = @{}
-        try {
-            foreach ($t in @(Get-MpThreat -ErrorAction Stop)) {
-                $names[('' + $t.ThreatID)] = ('' + $t.ThreatName)
-            }
-        } catch { }
-        foreach ($d in $dets) {
-            $n = $names[('' + $d.ThreatID)]
-            if (-not $n) { $n = 'ThreatID ' + $d.ThreatID }
-            $res = ''
-            try { $res = ('' + (@($d.Resources) | Select-Object -First 1)) } catch { }
-            Add-Finding ('Defender detected: ' + $n + '  ' + $res)
-        }
-        if ($passive) {
-            Add-CustomerWarning 'Threats were detected while Defender was passive - they were NOT removed. Manual remediation required.'
-        } else {
-            Add-CustomerWarning ('Defender found and actioned ' + $dets.Count + ' threat(s). Verify quarantine in Windows Security > Protection history.')
-        }
-        return @{ Status = 'THREAT'; Detail = ('' + $dets.Count + ' detection(s) - see findings') }
+    if ($scan.ExitCode -eq 2) {
+        Add-Finding 'ClamAV completed with errors; the scan log is in the run folder.'
+        return @{ Status = 'REVIEW'; Detail = 'Completed with errors' }
     }
-
-    $detail = 'No threats detected'
-    if ($puaShort) { $detail += ' (' + $puaShort + ')' }
-    if ($passive) {
-        return @{ Status = 'REVIEW'; Detail = 'Clean but PASSIVE - weak assurance' }
+    if ($upd.StaleAccepted) {
+        return @{ Status = 'REVIEW'; Detail = ('Clean but STALE defs (' + $ageText + ')') }
     }
-    return @{ Status = 'OK'; Detail = $detail }
+    return @{ Status = 'OK'; Detail = ('Clean, defs ' + $ageText) }
 }
 
 # ---------------------------------------------------------------------------
@@ -1016,26 +1043,114 @@ function Get-UserProfileDirs {
 }
 
 # Browsers must be closed or the deletes fail silently and the step reports a
-# useless zero. Never kill them - unsaved work in open tabs.
-function Wait-ForBrowsersClosed {
-    $names = @('chrome', 'msedge', 'firefox', 'brave')
-    while ($true) {
-        $running = @()
-        foreach ($n in $names) {
-            if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $running += $n }
+# useless zero.
+#
+# Edge in particular is almost always running: Windows keeps background
+# msedge processes alive for startup boost and web widgets even when nobody
+# has opened a browser, so "just close it" is not something a tech can do
+# from the taskbar. Hence the CLOSE option - but only ever after the tech
+# confirms, because open tabs may hold unsaved work.
+$script:BrowserProcessNames = @('chrome', 'msedge', 'firefox', 'brave')
+
+function Get-RunningBrowsers {
+    $found = @()
+    foreach ($n in $script:BrowserProcessNames) {
+        $procs = @(Get-Process -Name $n -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) {
+            $found += New-Object PSObject -Property @{ Name = $n; Count = $procs.Count }
         }
+    }
+    return $found
+}
+
+function Format-BrowserList {
+    param($Running)
+    return (($Running | ForEach-Object { $_.Name + ' (' + $_.Count + ')' }) -join ', ')
+}
+
+# Graceful first, force second. CloseMainWindow asks the browser to shut down
+# the way clicking the X does, so it saves its session and the customer gets
+# their tabs back on next launch; a straight kill can lose them. Background
+# processes have no main window and never respond to it, so whatever is left
+# after the grace period is force-stopped.
+function Stop-Browsers {
+    $gracefulAsked = 0
+    foreach ($n in $script:BrowserProcessNames) {
+        foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+            try {
+                if ($p.MainWindowHandle -ne 0) {
+                    [void]$p.CloseMainWindow()
+                    $gracefulAsked++
+                }
+            } catch { }
+        }
+    }
+    if ($gracefulAsked -gt 0) {
+        Write-Info ('  Asked ' + $gracefulAsked + ' browser window(s) to close and save their session...')
+        # Up to 15s for a clean shutdown; long enough for a session save, short
+        # enough that the tech is not left watching a frozen console.
+        for ($i = 0; $i -lt 30; $i++) {
+            if (@(Get-RunningBrowsers).Count -eq 0) { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
+    $forced = 0
+    foreach ($n in $script:BrowserProcessNames) {
+        foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                $forced++
+            } catch {
+                # Already gone between the enumerate and the stop, or protected.
+            }
+        }
+    }
+    if ($forced -gt 0) {
+        Write-Info ('  Force-closed ' + $forced + ' remaining process(es) (background tasks with no window).')
+    }
+    # Windows does not release the file handles the instant a process dies,
+    # and this step is all about deleting files those handles hold open.
+    Start-Sleep -Seconds 3
+    Write-Log ('Browser close: ' + $gracefulAsked + ' asked gracefully, ' + $forced + ' forced.')
+    return @(Get-RunningBrowsers)
+}
+
+function Wait-ForBrowsersClosed {
+    while ($true) {
+        $running = @(Get-RunningBrowsers)
         if ($running.Count -eq 0) { return $true }
 
         Write-Host ''
-        Write-Caution ('  These browsers are still running: ' + ($running -join ', '))
-        Write-Caution '  Their caches cannot be cleared while they are open, and the'
+        Write-Caution ('  Browsers running: ' + (Format-BrowserList $running))
+        Write-Caution '  Their caches cannot be cleared while these are open - the'
         Write-Caution '  deletes fail silently rather than erroring.'
         Write-Host ''
-        Write-Host '  Close them (save any open work first - this script will not kill'
-        Write-Host '  them for you), then press Enter to re-check.'
-        Write-Host '  Type SKIP to leave browser caches alone and move on.'
-        $answer = ('' + (Read-Host '  Enter to re-check, or SKIP')).Trim().ToUpper()
+        Write-Host '  Edge normally has background processes running even with no'
+        Write-Host '  window open, so this is expected rather than the customer'
+        Write-Host '  having left something running.'
+        Write-Host ''
+        Write-Host '    CLOSE  - close them now. Open windows are asked to shut down'
+        Write-Host '             first so tabs are saved and restored next launch;'
+        Write-Host '             only background processes get force-closed.'
+        Write-Host '    SKIP   - leave browser caches alone and move on'
+        Write-Host '    Enter  - re-check (if you would rather close them yourself)'
+        Write-Host ''
+        Write-Caution '  Check with the customer first if a window has unsaved work.'
+        $answer = ('' + (Read-Host '  CLOSE, SKIP, or Enter to re-check')).Trim().ToUpper()
+
         if ($answer -eq 'SKIP') { return $false }
+        if ($answer -eq 'CLOSE') {
+            $left = Stop-Browsers
+            if ($left.Count -eq 0) {
+                Write-Good '  All browsers closed.'
+                return $true
+            }
+            # Refused to die: usually a hung process or one held by another
+            # user session. Loop rather than plough on into silent failures.
+            Write-Caution ('  Still running after a forced close: ' + (Format-BrowserList $left))
+            Write-Caution '  Another logged-in user may have them open.'
+        }
     }
 }
 
@@ -1254,6 +1369,21 @@ function Step-WindowsCleanup {
 }
 
 # ---------------------------------------------------------------------------
+# Shared ClamAV logic, also used by Scan-Clam.ps1 for targeted re-scans after
+# remediation. Loaded rather than duplicated so the two can never drift.
+# Dot-sourced here, after the logging helpers and Invoke-CapturedProcess it
+# calls, and before any step that uses it.
+# ---------------------------------------------------------------------------
+$script:ClamLib = Join-Path $script:ScriptRoot 'ClamAV.Lib.ps1'
+if (Test-Path -LiteralPath $script:ClamLib) {
+    . $script:ClamLib
+} else {
+    # Missing library is not fatal: every other step still runs, and the
+    # ClamAV step reports itself as skipped.
+    function Test-ClamAvailable { return $false }
+}
+
+# ---------------------------------------------------------------------------
 # Step runner. A step failure records and moves on - it never aborts the run.
 # ---------------------------------------------------------------------------
 function Invoke-Step {
@@ -1427,8 +1557,8 @@ try {
     Invoke-Step -Number  2 -Name 'Restore point'       -Body { Step-RestorePoint }
     Invoke-Step -Number  3 -Name 'Temp cleanup'        -Body { Step-TempCleanup }
     Invoke-Step -Number  4 -Name 'Browser caches'      -Body { Step-BrowserCache }
-    Invoke-Step -Number  5 -Name 'Definition update'   -Body { Step-DefinitionUpdate }
-    Invoke-Step -Number  6 -Name 'Defender full scan'  -Body { Step-DefenderScan }
+    Invoke-Step -Number  5 -Name 'Defender defs'       -Body { Step-DefinitionUpdate }
+    Invoke-Step -Number  6 -Name 'ClamAV scan'         -Body { Step-ClamScan }
     Invoke-Step -Number  7 -Name 'Disk check (online)' -Body { Step-DiskCheck }
     Invoke-Step -Number  8 -Name 'DISM RestoreHealth'  -Body { Step-Dism }
     # SFC runs last so it verifies integrity AFTER the two cleanup steps have

@@ -1,8 +1,14 @@
-# Downloaded tool binaries live on each stick, never in the repo.
+# The extracted ClamAV build lives on each stick at the stick root, never
+# in the repo: clamscan.exe, freshclam.exe, sigtool.exe, freshclam.conf and
+# the database\ folder. The definition files alone run to a couple of
+# hundred megabytes and change on every scan, so this rule is load-bearing.
 # Update.cmd also skips this folder so updates cannot wipe it.
 #
 # Must stay at the repo root: a .gitignore only applies from its own
-# directory down, so a copy under Files\ does not ignore Tools\ here.
+# directory down.
+ClamAV/
+
+# Older layout kept the same binaries under Tools\; still honoured.
 Tools/
 
 # Run logs (the cleanup script itself only logs to %TEMP%, but keep the
