@@ -84,8 +84,8 @@ the run. Show a progress indicator per step and an overall "step N of M".
 | 2 | Restore point | `Checkpoint-Computer -Description "Pre-Cleanup" -RestorePointType MODIFY_SETTINGS` | success/failure |
 | 3 | Temp cleanup | Native PowerShell delete: `%TEMP%`, `C:\Windows\Temp`, `C:\Windows\Prefetch`, recycle bin | bytes freed, files deleted |
 | 4 | Browser caches | Native delete across EVERY profile in `C:\Users`: Chrome/Edge/Brave `Cache` and `Code Cache`, Firefox `cache2`, `thumbcache_*.db`, `INetCache` | bytes freed per category |
-| 5 | Defender definitions | `Update-MpSignature`, plus a READ-ONLY posture check (AMRunningMode, PUA, third-party AV) | version before/after, passive mode |
-| 6 | ClamAV scan | `Scripts/ClamAV.Lib.ps1`: verified freshclam update, then clamscan | infected count, FOUND lines, defs age |
+| 5 | ClamAV definitions | `freshclam` via `Scripts/ClamAV.Lib.ps1`, update VERIFIED not trusted | version before/after, defs age |
+| 6 | ClamAV scan | `clamscan` via `Scripts/ClamAV.Lib.ps1`, using step 5's definitions | infected count, FOUND lines |
 | 7 | Disk check | `chkdsk C: /scan` | errors found / clean |
 | 8 | DISM | `Dism.exe /Online /Cleanup-Image /RestoreHealth` | "restore operation completed successfully", error codes, real % progress |
 | 9 | Component cleanup | `Dism.exe /Online /Cleanup-Image /StartComponentCleanup` | free-space delta, real % progress |
@@ -109,6 +109,17 @@ removing components.
   for third-party AV. In passive mode Defender still scans and detects but does NOT
   remediate. Report this clearly - a CLEAN result from passive Defender is not the same
   assurance as one from an active scan.
+- **There is NO Defender step. Do not add one back.** The full scan is manual (see
+  below), and Windows Security updates its own definitions when the tech runs it, so
+  an `Update-MpSignature` step in this script buys nothing. The passive-mode and PUA
+  posture check is still made - once, at startup, not as a step - because the tech
+  needs to know before they reach Windows Security that a passive machine will not run
+  an on-demand scan until Periodic scanning is turned on.
+- **Any step can be skipped mid-run: press S, then type SKIP to confirm.** Two
+  deliberate actions. A single keypress would be far too easy to trigger by accident on
+  steps that run for tens of minutes. The check is polled from the process runner and
+  the file-deletion loops; `[Console]::KeyAvailable` throws when input is redirected, so
+  a non-interactive host must simply never offer it rather than blocking.
 - **The Defender FULL SCAN is manual, in the SOP - do not automate it again.** It ran
   one to three hours emitting nothing, so a slow scan and a hung one were
   indistinguishable and techs killed healthy runs. Driven by hand from Windows

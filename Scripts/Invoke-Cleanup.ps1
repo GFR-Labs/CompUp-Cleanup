@@ -53,14 +53,14 @@ $script:AbortRun          = $false  # set when the tech types STOP at the drive 
 $script:DefenderAvailable = $false
 $script:WindowsText       = 'Windows (version unknown)'
 $script:TotalReclaimed    = [long]0   # headline number for the work order
+$script:SkipRequested     = $false    # set when the tech confirms a step skip
 
 # Resolved once: %SystemDrive% is not guaranteed to be C: on every machine.
 $script:SystemDriveLetter = $env:SystemDrive
 if (-not $script:SystemDriveLetter) { $script:SystemDriveLetter = 'C:' }
 
 # Timeouts. Every one of these is enforced by a loop that is guaranteed to
-# come back around (see Invoke-CapturedProcess / Invoke-JobWithTimeout).
-$script:SigUpdateTimeoutMinutes = 15
+# come back around (see Invoke-CapturedProcess).
 $script:ChkdskTimeoutMinutes    = 90
 $script:DismTimeoutMinutes      = 180
 $script:SfcTimeoutMinutes       = 120
@@ -189,6 +189,44 @@ function Add-ReclaimedFromFreeSpace {
     }
     Write-Log ('Free-space delta was ' + $delta + ' bytes; not counted toward the total.')
     return [long]0
+}
+
+# ---------------------------------------------------------------------------
+# Mid-step skip.
+#
+# A tech watching a step that is clearly going nowhere - chkdsk grinding on a
+# sick drive, cleanmgr sitting on a huge Update Cleanup - needs a way out
+# that does not mean killing the whole run and losing the summary.
+#
+# Deliberately two-stage. Pressing S only raises the question; the step is
+# abandoned only after typing SKIP in full. A single keypress would be far
+# too easy to trigger by leaning on the keyboard, and the whole point of
+# these steps is that they are slow enough to walk away from.
+# ---------------------------------------------------------------------------
+function Test-SkipRequested {
+    if ($script:SkipRequested) { return $true }
+    # KeyAvailable throws when input is redirected (not a real console), so
+    # a non-interactive host simply never offers the skip.
+    try {
+        if (-not [Console]::KeyAvailable) { return $false }
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -ne [ConsoleKey]::S) { return $false }
+    } catch {
+        return $false
+    }
+
+    Write-Host ''
+    Write-Caution '  Skip this step?  Type SKIP to abandon it, or press Enter to carry on.'
+    $answer = ''
+    try { $answer = ('' + (Read-Host '  SKIP, or Enter to continue')).Trim().ToUpper() } catch { }
+    if ($answer -eq 'SKIP') {
+        $script:SkipRequested = $true
+        Write-Caution '  Skipping this step. The rest of the run continues.'
+        Write-Log 'Tech skipped a step with the S / SKIP gate.'
+        return $true
+    }
+    Write-Info '  Carrying on.'
+    return $false
 }
 
 function Get-StatusColor {
@@ -398,6 +436,10 @@ function Invoke-CapturedProcess {
                 $result.TimedOut = $true
                 Write-Log ('TIMEOUT after ' + $TimeoutMinutes + 'm: ' + $FilePath)
                 $done = $true
+            } elseif (Test-SkipRequested) {
+                try { $proc.Kill() } catch { }
+                Write-Log ('Step skipped by tech: ' + $FilePath)
+                $done = $true
             } elseif (-not $sawData) {
                 # A process that prints no progress at all (cleanmgr) would
                 # otherwise look identical to a hung one. Show elapsed time
@@ -431,45 +473,6 @@ function Invoke-CapturedProcess {
     }
     Write-Log ('Exit code: ' + $result.ExitCode + '  TimedOut: ' + $result.TimedOut)
     return $result
-}
-
-# ---------------------------------------------------------------------------
-# Runs a scriptblock in a background job with an elapsed-time heartbeat and a
-# hard timeout. Used for the Defender cmdlets, which block with no progress
-# output and, offline, can otherwise sit forever.
-# ---------------------------------------------------------------------------
-function Invoke-JobWithTimeout {
-    param(
-        [scriptblock]$Body,
-        [int]$TimeoutMinutes,
-        [string]$Activity
-    )
-    $outcome = @{ TimedOut = $false; Errors = @() }
-    $job = Start-Job -ScriptBlock $Body
-    $started = Get-Date
-    try {
-        while ($job.State -eq 'Running') {
-            $elapsed = (Get-Date) - $started
-            if ($elapsed.TotalMinutes -gt $TimeoutMinutes) {
-                try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch { }
-                $outcome.TimedOut = $true
-                Write-Log ('TIMEOUT after ' + $TimeoutMinutes + 'm: ' + $Activity)
-                break
-            }
-            try {
-                Write-Progress -Id 2 -ParentId 1 -Activity $Activity `
-                    -Status ('Elapsed ' + (Format-Duration $elapsed) + ' (limit ' + $TimeoutMinutes + 'm)')
-            } catch { }
-            Start-Sleep -Seconds 5
-        }
-        $jobErrors = @()
-        $null = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors
-        $outcome.Errors = @($jobErrors)
-    } finally {
-        try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch { }
-        try { Write-Progress -Id 2 -ParentId 1 -Activity $Activity -Completed } catch { }
-    }
-    return $outcome
 }
 
 # ---------------------------------------------------------------------------
@@ -589,7 +592,12 @@ function Clear-TempFolder {
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $stat }
 
     $files = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)
+    $seen = 0
     foreach ($f in $files) {
+        # Checked every 200 files rather than every file: the check is cheap
+        # but not free, and these loops run to tens of thousands of files.
+        $seen++
+        if (($seen % 200) -eq 0 -and (Test-SkipRequested)) { break }
         $skip = $false
         foreach ($ex in $ExcludePrefixes) {
             if ($ex -and $f.FullName.StartsWith($ex, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -734,62 +742,6 @@ function Get-DefenderPosture {
     return $out
 }
 
-# Kept even though the Defender SCAN is now manual: it takes about a minute
-# and means the tech's manual full scan starts with current signatures
-# instead of downloading them first while they wait.
-function Step-DefinitionUpdate {
-    if (-not $script:DefenderAvailable) {
-        return @{ Status = 'REVIEW'; Detail = 'Defender cmdlets not available on this machine' }
-    }
-    $before = ''
-    $beforeDate = $null
-    try {
-        $st = Get-MpComputerStatus -ErrorAction Stop
-        $before = ('' + $st.AntivirusSignatureVersion)
-        $beforeDate = $st.AntivirusSignatureLastUpdated
-    } catch { }
-
-    # Run in a job: with no internet Update-MpSignature can stall well past
-    # its own patience, and this bench has no guaranteed connection.
-    $r = Invoke-JobWithTimeout -Body { Update-MpSignature -ErrorAction Stop } `
-        -TimeoutMinutes $script:SigUpdateTimeoutMinutes -Activity 'Updating Defender definitions'
-
-    $after = $before
-    $afterDate = $beforeDate
-    try {
-        $st2 = Get-MpComputerStatus -ErrorAction Stop
-        $after = ('' + $st2.AntivirusSignatureVersion)
-        $afterDate = $st2.AntivirusSignatureLastUpdated
-    } catch { }
-
-    $ageNote = ''
-    if ($afterDate) {
-        $ageDays = [int]((Get-Date) - $afterDate).TotalDays
-        $ageNote = ' (' + $afterDate.ToString('yyyy-MM-dd') + ')'
-        if ($ageDays -gt 7) {
-            Add-Finding ('Defender definitions are ' + $ageDays + ' days old; the scan ran with stale signatures.')
-        }
-    }
-
-    if ($r.TimedOut) {
-        return @{ Status = 'REVIEW'; Detail = 'Timed out; using ' + $after + $ageNote }
-    }
-    if ($r.Errors.Count -gt 0) {
-        Write-Log ('Update-MpSignature error: ' + ('' + $r.Errors[0]))
-        return @{ Status = 'REVIEW'; Detail = 'No update (offline?); using ' + $after + $ageNote }
-    }
-    # Posture for the MANUAL scan that follows. Read-only: nothing here
-    # changes the customer's configuration. This used to live in the
-    # automated scan step; it matters more now, because the tech is about to
-    # drive Defender by hand and needs to know what they are walking into.
-    $posture = Get-DefenderPosture
-
-    if ($after -ne $before) {
-        return @{ Status = $posture.Status; Detail = $before + ' -> ' + $after + $posture.Suffix }
-    }
-    return @{ Status = $posture.Status; Detail = 'Current: ' + $after + $ageNote + $posture.Suffix }
-}
-
 # ---------------------------------------------------------------------------
 # ClamAV: update the signatures, verify the update landed, then scan.
 #
@@ -804,27 +756,55 @@ function Step-DefinitionUpdate {
 # is no point scanning files that are about to be deleted, and on a neglected
 # machine that removes a lot of scan surface.
 # ---------------------------------------------------------------------------
-function Step-ClamScan {
+# Step 5: ClamAV definitions. freshclam, with the update VERIFIED rather
+# than trusted - see the library for why an exit code of 0 is not enough.
+# This replaced the Defender definition update, which is no longer needed
+# now that the Defender scan is driven by hand from Windows Security and
+# updates itself there.
+function Step-ClamUpdate {
+    $script:ClamUpdate = $null
     if (-not (Test-ClamAvailable)) {
-        Add-Finding 'ClamAV is not on this stick (Tools\ClamAV\clamscan.exe missing), so the second-opinion scan did not run. Rebuild the stick before the next job.'
-        return @{ Status = 'REVIEW'; Detail = 'ClamAV not on this stick - skipped' }
+        Add-Finding ('ClamAV is not on this stick - no clamscan.exe under ' + $script:StickRoot + '\ClamAV\. The virus scan did not run. Extract the portable ClamAV build there and re-run.')
+        Add-CustomerWarning 'The virus scan did not run: the scanning tool was missing from the technician stick.'
+        return @{ Status = 'REVIEW'; Detail = 'ClamAV not on this stick' }
     }
     Initialize-ClamPaths
+    Write-Info ('  ClamAV  : ' + $script:ClamRoot)
     Write-Info ('  Database: ' + $script:DataDir)
 
     $upd = Invoke-ClamUpdateVerified -Interactive $true
+    $script:ClamUpdate = $upd
     $db = $upd.Db
     $ageText = 'age unknown'
     if ($db -and $db.AgeDays -ne $null) { $ageText = ('' + $db.AgeDays + 'd old') }
 
     if ($upd.Aborted) {
-        Add-Finding 'ClamAV definitions could not be updated and the tech declined to scan on stale signatures, so no ClamAV scan was run.'
-        Add-CustomerWarning 'The second-opinion virus scan did not run because its definitions could not be updated.'
-        return @{ Status = 'SKIP'; Detail = 'Update failed, scan declined' }
+        Add-Finding 'ClamAV definitions could not be updated and the tech declined to scan on stale signatures, so no virus scan was run.'
+        Add-CustomerWarning 'The virus scan did not run because its definitions could not be updated.'
+        return @{ Status = 'FAIL'; Detail = 'Update failed, scan declined' }
     }
     if ($upd.StaleAccepted) {
-        Add-Finding ('ClamAV scanned on STALE signatures (' + $ageText + '): the update could not be verified. A clean result here is weak assurance.')
+        Add-Finding ('ClamAV is scanning on STALE signatures (' + $ageText + '): the update could not be verified. A clean result is weak assurance.')
+        return @{ Status = 'REVIEW'; Detail = ('STALE - scanning on defs ' + $ageText) }
     }
+    if ($upd.Advanced) {
+        return @{ Status = 'OK'; Detail = ('Updated, defs ' + $ageText) }
+    }
+    return @{ Status = 'OK'; Detail = ('Already current, defs ' + $ageText) }
+}
+
+# Step 6: the scan itself, using whatever step 5 left in place.
+function Step-ClamScan {
+    $upd = $script:ClamUpdate
+    if (-not $upd) {
+        return @{ Status = 'SKIP'; Detail = 'No usable definitions - see step 5' }
+    }
+    if ($upd.Aborted) {
+        return @{ Status = 'SKIP'; Detail = 'Update declined at step 5' }
+    }
+    $db = $upd.Db
+    $ageText = 'age unknown'
+    if ($db -and $db.AgeDays -ne $null) { $ageText = ('' + $db.AgeDays + 'd old') }
 
     $targets = @(
         (Join-Path $env:SystemDrive 'Users'),
@@ -1399,6 +1379,7 @@ function Invoke-Step {
             -Status ('Step ' + $Number + ' of ' + $script:TotalSteps + ' - ' + $Name) `
             -PercentComplete ([int](($Number - 1) * 100 / $script:TotalSteps))
     } catch { }
+    Write-Host '  (press S then type SKIP to abandon this step)' -ForegroundColor DarkGray
     Write-Log ('=== Step ' + $Number + '/' + $script:TotalSteps + ': ' + $Name + ' ===')
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1417,6 +1398,13 @@ function Invoke-Step {
         }
     }
     $sw.Stop()
+
+    # A skip confirmed mid-step wins over whatever the body managed to
+    # return, and is cleared here so it applies to this step only.
+    if ($script:SkipRequested) {
+        $res = @{ Status = 'SKIP'; Detail = 'Skipped by tech' }
+        $script:SkipRequested = $false
+    }
 
     if ($res -is [System.Array]) { $res = $res[-1] }   # guard against stray pipeline output
     if (-not ($res -is [hashtable]) -or -not $res.ContainsKey('Status')) {
@@ -1550,14 +1538,20 @@ try {
             $script:DefenderAvailable = $true
         }
     } catch {
-        Write-Caution '  Defender cmdlets are not usable on this machine; steps 4-5 will be limited.'
+        Write-Caution '  Defender cmdlets are not usable on this machine.'
     }
+    # Read-only posture check. There is no Defender STEP any more - the scan
+    # is manual and updates itself - but the tech still needs to know before
+    # they get to Windows Security whether Defender is passive, because on a
+    # passive machine an on-demand scan does nothing until Periodic scanning
+    # is turned on.
+    $null = Get-DefenderPosture
 
     Invoke-Step -Number  1 -Name 'Drive health gate'   -Body { Step-DriveHealth }
     Invoke-Step -Number  2 -Name 'Restore point'       -Body { Step-RestorePoint }
     Invoke-Step -Number  3 -Name 'Temp cleanup'        -Body { Step-TempCleanup }
     Invoke-Step -Number  4 -Name 'Browser caches'      -Body { Step-BrowserCache }
-    Invoke-Step -Number  5 -Name 'Defender defs'       -Body { Step-DefinitionUpdate }
+    Invoke-Step -Number  5 -Name 'ClamAV definitions'  -Body { Step-ClamUpdate }
     Invoke-Step -Number  6 -Name 'ClamAV scan'         -Body { Step-ClamScan }
     Invoke-Step -Number  7 -Name 'Disk check (online)' -Body { Step-DiskCheck }
     Invoke-Step -Number  8 -Name 'DISM RestoreHealth'  -Body { Step-Dism }

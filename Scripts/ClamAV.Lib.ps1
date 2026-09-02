@@ -49,16 +49,38 @@ function Test-ClamAvailable {
 # Scripts\. An older layout kept it under Tools\; still honoured. Say which
 # was used rather than failing with a path the tech has to guess at.
 function Resolve-ClamRoot {
-    $candidates = @(
+    $roots = @(
         (Join-Path $script:StickRoot 'ClamAV'),
         (Join-Path (Join-Path $script:StickRoot 'Tools') 'ClamAV')
     )
-    foreach ($c in $candidates) {
-        if (Test-Path -LiteralPath (Join-Path $c 'clamscan.exe')) { return $c }
+    foreach ($r in $roots) {
+        if (Test-Path -LiteralPath (Join-Path $r 'clamscan.exe')) { return $r }
     }
-    throw ('ClamAV not found. Looked for clamscan.exe in:' + [Environment]::NewLine +
-           '    ' + ($candidates -join ([Environment]::NewLine + '    ')) + [Environment]::NewLine +
-           '  Tools\ is not part of the repo - download the portable ClamAV build onto this stick first.')
+    # Extracting the official zip often leaves its own folder behind, so the
+    # binaries end up at ClamAV\clamav-1.4.1.win.x64\clamscan.exe rather than
+    # ClamAV\clamscan.exe. Look one level down before giving up, so a stick
+    # that was built by dragging the zip contents across still works.
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        foreach ($sub in @(Get-ChildItem -LiteralPath $r -Directory -ErrorAction SilentlyContinue)) {
+            if (Test-Path -LiteralPath (Join-Path $sub.FullName 'clamscan.exe')) { return $sub.FullName }
+        }
+    }
+    # Say what was actually there. "Not found" against a folder the tech can
+    # see on the stick is the least useful error possible.
+    $detail = ''
+    foreach ($r in $roots) {
+        if (Test-Path -LiteralPath $r) {
+            $names = @(Get-ChildItem -LiteralPath $r -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            if ($names.Count -eq 0) { $detail += ([Environment]::NewLine + '    ' + $r + ' exists but is empty') }
+            else { $detail += ([Environment]::NewLine + '    ' + $r + ' contains: ' + (($names | Select-Object -First 8) -join ', ')) }
+        } else {
+            $detail += ([Environment]::NewLine + '    ' + $r + ' does not exist')
+        }
+    }
+    throw ('ClamAV not usable: no clamscan.exe found.' + $detail + [Environment]::NewLine +
+           '  Extract the portable ClamAV build so that clamscan.exe, freshclam.exe and' + [Environment]::NewLine +
+           '  sigtool.exe sit directly in ' + (Join-Path $script:StickRoot 'ClamAV') + '.')
 }
 
 function Get-DatabaseInfo {

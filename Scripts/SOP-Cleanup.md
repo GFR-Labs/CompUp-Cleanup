@@ -53,22 +53,27 @@ gate, at the summary, and in the manual checklist.
    - `SKIP` moves on and leaves browser caches alone. `Enter` re-checks if
      you would rather close them yourself.
 
-8. **ClamAV scan (step 6).** This is the automated virus scan - a second
-   opinion from a different engine to Defender. It updates its own
-   definitions first and verifies the update landed. If the update cannot
-   be verified it will ask you to type YES before scanning on stale
-   signatures: **read the age it prints first**, and prefer fixing the
-   update over scanning stale. Anything it finds is reported, never
-   removed - see step 12.
+8. **ClamAV definitions and scan (steps 5 and 6).** Step 5 runs freshclam
+   and VERIFIES the update actually landed - a clean exit code is not
+   enough. If it cannot be verified it asks you to type YES before
+   scanning on stale signatures: **read the age it prints first**, and
+   prefer fixing the update over scanning stale. Step 6 is the scan
+   itself. Anything it finds is reported, never removed - see the
+   remediation step below.
 
-   If the summary says `PASSIVE` next to Defender defs, note it now: it
-   changes what you do in step 11.
+   If the run printed a PASSIVE warning about Defender at startup, note it
+   now: it changes what you do at the manual Defender scan.
 
-9. Let the run go. The ClamAV scan is now the long step (typically 20-40
+9. Let the run go. The ClamAV scan is the long step (typically 20-40
    minutes); the window shows elapsed time and per-step progress. Do not
-   click inside the console window while it runs. The whole run is much
-   shorter than it used to be, because the Defender full scan moved out of
-   it and into the manual checklist.
+   click inside the console window while it runs.
+
+   **To skip a step that is clearly going nowhere** - chkdsk grinding on a
+   sick drive, cleanmgr stuck on a huge Update Cleanup - press **S**, then
+   type **SKIP** and Enter to confirm. Two deliberate actions, so you
+   cannot do it by leaning on the keyboard. The step is marked SKIP in the
+   summary and the run carries on; nothing else is lost. Pressing S and
+   then Enter carries on as normal, so it is safe to check.
 10. If the run stops with a red FATAL ERROR, photograph the screen
     (message, line number) and report it - do not just rerun and hope.
 
