@@ -108,8 +108,10 @@ function Write-Warn { param([string]$m) Write-Host $m -ForegroundColor Yellow }
 function Write-Bad  { param([string]$m) Write-Host $m -ForegroundColor Red }
 
 # Snapshot of file hashes, used to report what an update actually changed.
-# Tools\ and .git\ are excluded: Tools\ is the tech's own binaries and .git\
-# churns on every pull.
+# ClamAV\, Tools\ and .git\ are excluded: the first two are the tech's own
+# binaries plus definition files that change on every scan, and .git\
+# churns on every pull. Without this the report calls every freshclam run
+# "changed files" and hashes a couple of hundred megabytes doing it.
 function Get-Snapshot {
     param([string]$Folder)
     $map = @{}
@@ -117,7 +119,7 @@ function Get-Snapshot {
         $rel = $f.FullName.Substring($Folder.Length).TrimStart('\', '/')
         # Both separators accepted: Windows hands back '\', but a path that
         # arrived normalized must not sneak Tools\ or .git\ into the diff.
-        if ($rel -match '^(Tools|\.git)(\\|/|$)') { continue }
+        if ($rel -match '^(ClamAV|Tools|\.git)(\\|/|$)') { continue }
         try {
             $map[$rel] = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
         } catch { }
@@ -251,7 +253,7 @@ try {
         $copied = 0
         foreach ($f in @(Get-ChildItem -LiteralPath $srcRoot.FullName -Recurse -File -Force)) {
             $rel = $f.FullName.Substring($srcRoot.FullName.Length + 1)
-            if ($rel -match '^(Tools)(\\|/|$)') { continue }
+            if ($rel -match '^(ClamAV|Tools)(\\|/|$)') { continue }
             $dest = Join-Path $TargetFolder $rel
             $destDir = Split-Path -Parent $dest
             if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
@@ -298,7 +300,7 @@ try {
     $toCheck = @(Get-ChildItem -LiteralPath $TargetFolder -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
             ($_.Extension -eq '.ps1' -or $_.Extension -eq '.cmd') -and
-            ($_.FullName.Substring($TargetFolder.Length).TrimStart('\', '/') -notmatch '^(Tools|\.git)(\\|/)')
+            ($_.FullName.Substring($TargetFolder.Length).TrimStart('\', '/') -notmatch '^(ClamAV|Tools|\.git)(\\|/)')
         })
     foreach ($file in $toCheck) {
         $needsBom = ($file.Extension -eq '.ps1')

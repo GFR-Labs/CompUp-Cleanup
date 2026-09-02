@@ -45,10 +45,13 @@ function Test-ClamAvailable {
     }
 }
 
+# The extracted ClamAV build sits in ClamAV\ at the stick root, beside
+# Scripts\. An older layout kept it under Tools\; still honoured. Say which
+# was used rather than failing with a path the tech has to guess at.
 function Resolve-ClamRoot {
     $candidates = @(
-        (Join-Path (Join-Path $script:StickRoot 'Tools') 'ClamAV'),
-        (Join-Path $script:StickRoot 'ClamAV')
+        (Join-Path $script:StickRoot 'ClamAV'),
+        (Join-Path (Join-Path $script:StickRoot 'Tools') 'ClamAV')
     )
     foreach ($c in $candidates) {
         if (Test-Path -LiteralPath (Join-Path $c 'clamscan.exe')) { return $c }

@@ -1,5 +1,0 @@
-# Ship exact bytes. ASCII + CRLF (+ UTF-8 BOM on .ps1) is a hard
-# requirement for Windows PowerShell 5.1, so all git end-of-line
-# normalization is disabled: what is committed is what lands on the
-# stick, whether via git pull or the GitHub zip download.
-* -text

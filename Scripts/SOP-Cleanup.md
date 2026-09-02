@@ -128,12 +128,14 @@ them from this document.
 
     - Repeat until that path comes back clean.
 
-16. **Autoruns** (`Tools\Sysinternals\Autoruns.exe`): Options > Check
+16. **Autoruns** (Sysinternals; free from Microsoft, not on the stick):
+    Options > Check
     VirusTotal, Hide Microsoft Entries. Review everything that remains;
     research anything you do not recognize before deleting it.
-17. **Process Explorer** (`Tools\Sysinternals\procexp.exe`): enable the
+17. **Process Explorer** (Sysinternals, not on the stick): enable the
     VirusTotal column, review running processes.
-18. **BleachBit** (`Tools\BleachBit\`): browser cache and temp ONLY. Never
+18. **BleachBit** (portable build, not on the stick): browser cache and
+    temp ONLY. Never
     cookies, saved passwords, or history - wiping the customer's logged-in
     sessions turns a cleanup into a callback.
 19. **Defender Offline scan**: Windows Security > Virus and threat
