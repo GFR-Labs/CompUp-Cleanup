@@ -110,22 +110,6 @@ function Initialize-WorkDir {
     }
 }
 
-# ClamAV lives in Tools\ on the stick, but a stick built by hand may have it
-# straight at the root. Try both and say which was used rather than failing
-# with a path the tech has to guess at.
-function Resolve-ClamRoot {
-    $candidates = @(
-        (Join-Path (Join-Path $script:StickRoot 'Tools') 'ClamAV'),
-        (Join-Path $script:StickRoot 'ClamAV')
-    )
-    foreach ($c in $candidates) {
-        if (Test-Path -LiteralPath (Join-Path $c 'clamscan.exe')) { return $c }
-    }
-    throw ('ClamAV not found. Looked for clamscan.exe in:' + [Environment]::NewLine +
-           '    ' + ($candidates -join ([Environment]::NewLine + '    ')) + [Environment]::NewLine +
-           '  Tools\ is not part of the repo - download the portable ClamAV build onto this stick first.')
-}
-
 # ---------------------------------------------------------------------------
 # Child process with a reachable timeout.
 #
@@ -212,142 +196,17 @@ function Invoke-CapturedProcess {
 }
 
 # ---------------------------------------------------------------------------
-# Database identity via sigtool.
-#
-# BOTH daily.cvd and daily.cld are checked. freshclam produces .cvd after a
-# full download and .cld after incremental patching, so looking only at .cvd
-# reports "cannot read the database" on a database that is perfectly fine.
+# Shared ClamAV logic, also used by Invoke-Cleanup.ps1's ClamAV step. Loaded
+# here rather than duplicated so the standalone re-scan and the cleanup chain
+# can never behave differently. Dot-sourced AFTER the helpers above, which it
+# calls.
 # ---------------------------------------------------------------------------
-function Get-DatabaseInfo {
-    $info = New-Object PSObject -Property @{
-        Found = $false; File = ''; Version = ''; BuildTime = $null; AgeDays = $null
-    }
-    $sigtool = Join-Path $script:ClamRoot 'sigtool.exe'
-    if (-not (Test-Path -LiteralPath $sigtool)) {
-        Write-Log 'sigtool.exe not found; cannot verify the database version.'
-        return $info
-    }
-    foreach ($name in @('daily.cvd', 'daily.cld')) {
-        $path = Join-Path $script:DataDir $name
-        if (-not (Test-Path -LiteralPath $path)) { continue }
-        $r = Invoke-CapturedProcess -FilePath $sigtool -ArgumentString ('--info "' + $path + '"') -TimeoutMinutes 2
-        $out = ('' + $r.Output + $r.StdErr)
-        Write-Log ('sigtool --info ' + $name + ':' + [Environment]::NewLine + $out)
-        if ($out -match '(?m)^\s*Version:\s*(\S+)') {
-            $info.Found = $true; $info.File = $name; $info.Version = $Matches[1]
-        }
-        if ($out -match '(?m)^\s*Build time:\s*(.+?)\s*$') {
-            $raw = $Matches[1]
-            $dt = [datetime]::MinValue
-            # sigtool prints e.g. "25 Sep 2024 08:33 -0400". Exact forms first,
-            # then a loose parse, so a format change degrades to "age unknown"
-            # rather than throwing.
-            $parsed = $false
-            foreach ($f in @('dd MMM yyyy HH:mm zzz', 'd MMM yyyy HH:mm zzz',
-                             'dd MMM yyyy HH:mm:ss zzz', 'd MMM yyyy HH:mm:ss zzz')) {
-                if ([datetime]::TryParseExact($raw, $f, [Globalization.CultureInfo]::InvariantCulture,
-                        [Globalization.DateTimeStyles]::None, [ref]$dt)) { $parsed = $true; break }
-            }
-            if (-not $parsed) {
-                $parsed = [datetime]::TryParse($raw, [Globalization.CultureInfo]::InvariantCulture,
-                    [Globalization.DateTimeStyles]::None, [ref]$dt)
-            }
-            if ($parsed) {
-                $info.BuildTime = $dt
-                $info.AgeDays = [int]((Get-Date) - $dt).TotalDays
-            }
-        }
-        if ($info.Found) { break }
-    }
-    return $info
+$script:ClamLib = Join-Path $script:ScriptRoot 'ClamAV.Lib.ps1'
+if (-not (Test-Path -LiteralPath $script:ClamLib)) {
+    throw ('ClamAV.Lib.ps1 not found beside this script at ' + $script:ClamLib +
+           '. The stick folder is incomplete - run Update.cmd on the bench machine.')
 }
-
-function Format-DbInfo {
-    param($Info)
-    if (-not $Info.Found) { return 'unknown (sigtool could not read it)' }
-    $s = $Info.File + ' v' + $Info.Version
-    if ($Info.AgeDays -ne $null) { $s += ' (' + $Info.AgeDays + ' days old)' }
-    return $s
-}
-
-# ---------------------------------------------------------------------------
-# Did freshclam actually fail, whatever its exit code said?
-#
-# The matching has to be careful in BOTH directions. "Your ClamAV installation
-# is OUTDATED" refers to the ENGINE binary being older than the current
-# release, not to the signatures. Treating that as a failure would make every
-# run stop and demand a YES, which trains techs to type YES without reading
-# and destroys the value of the gate. So it is stripped before matching.
-# ---------------------------------------------------------------------------
-function Test-FreshclamFailed {
-    param([string]$Output)
-    $reasons = @()
-    $text = ('' + $Output)
-    $text = $text -replace '(?im)^.*your clamav installation is outdated.*$', ''
-    $text = $text -replace '(?im)^.*recommended version.*$', ''
-    $text = $text -replace "(?im)^.*don'?t panic.*$", ''
-
-    $patterns = @(
-        @{ Rx = '(?i)\d+\s+version[s]?\s+behind';            Why = 'database reported as versions behind' },
-        @{ Rx = '(?i)database.{0,40}(out of date|outdated)'; Why = 'database reported out of date' },
-        @{ Rx = "(?i)can'?t\s+download";                     Why = 'download failed' },
-        @{ Rx = '(?i)failed to download';                    Why = 'download failed' },
-        @{ Rx = '(?i)update failed';                         Why = 'update failed' },
-        @{ Rx = '(?i)not\s+(fully\s+)?synchronized';         Why = 'mirror not synchronized' },
-        @{ Rx = '(?i)^\s*ERROR[:\s]';                        Why = 'freshclam reported an error' }
-    )
-    foreach ($p in $patterns) { if ($text -match $p.Rx) { $reasons += $p.Why } }
-    return @($reasons | Select-Object -Unique)
-}
-
-# Written only when absent, never overwritten: a conf produced by the shop's
-# Setup-ClamAV.cmd may carry proxy or mirror settings this would destroy.
-function New-FreshclamConfIfMissing {
-    if (Test-Path -LiteralPath $script:ConfFile) { return $false }
-    $lines = @(
-        '# Generated by Scan-Clam because no freshclam.conf was present.',
-        '# Minimal settings only. If this shop has a tuned config (proxy, private',
-        '# mirror), put it here and this file will be left alone from now on.',
-        'DatabaseMirror database.clamav.net',
-        ('DatabaseDirectory ' + $script:DataDir),
-        'Checks 24'
-    )
-    Set-Content -LiteralPath $script:ConfFile -Value $lines -Encoding ASCII -ErrorAction Stop
-    return $true
-}
-
-function Invoke-Freshclam {
-    param([string]$Activity)
-    $exe = Join-Path $script:ClamRoot 'freshclam.exe'
-    if (-not (Test-Path -LiteralPath $exe)) { throw ('freshclam.exe not found at ' + $exe) }
-    # --datadir overrides the config so the stick's drive letter can change.
-    $argStr = '--config-file="' + $script:ConfFile + '" --datadir="' + $script:DataDir + '"'
-    $r = Invoke-CapturedProcess -FilePath $exe -ArgumentString $argStr `
-        -TimeoutMinutes $script:FreshclamTimeoutMinutes -Activity $Activity
-    Write-Log ('freshclam stdout:' + [Environment]::NewLine + $r.Output)
-    Write-Log ('freshclam stderr:' + [Environment]::NewLine + $r.StdErr)
-    return $r
-}
-
-# A failed or corrupt incremental .cdiff patch is the usual reason a database
-# will not advance. Removing the files forces the next run to pull full .cvd
-# files instead of trying to patch what is already there.
-function Reset-ClamDatabase {
-    $removed = 0
-    foreach ($n in @('daily.cvd', 'daily.cld', 'main.cvd', 'main.cld', 'bytecode.cvd', 'bytecode.cld')) {
-        $p = Join-Path $script:DataDir $n
-        if (Test-Path -LiteralPath $p) {
-            try {
-                Remove-Item -LiteralPath $p -Force -ErrorAction Stop
-                $removed++
-                Write-Log ('Removed ' + $n + ' to force a full download.')
-            } catch {
-                Write-Caution ('  Could not remove ' + $n + ': ' + $_.Exception.Message)
-            }
-        }
-    }
-    return $removed
-}
+. $script:ClamLib
 
 # ===========================================================================
 # Main
@@ -365,101 +224,26 @@ try {
     Write-Host ('  ' + $env:COMPUTERNAME + '  |  ' + $script:RunStart.ToString('yyyy-MM-dd HH:mm'))
     Write-Host ('=' * 78) -ForegroundColor Cyan
 
-    $script:ClamRoot = Resolve-ClamRoot
-    $script:DataDir  = Join-Path $script:ClamRoot 'database'
-    $script:ConfFile = Join-Path $script:ClamRoot 'freshclam.conf'
+    Initialize-ClamPaths
     Write-Info ('  ClamAV   : ' + $script:ClamRoot)
     Write-Info ('  Database : ' + $script:DataDir)
 
-    if (-not (Test-Path -LiteralPath $script:DataDir)) {
-        $null = New-Item -Path $script:DataDir -ItemType Directory -Force -ErrorAction SilentlyContinue
-    }
-    if (New-FreshclamConfIfMissing) {
-        Write-Caution ('  freshclam.conf was missing; wrote a minimal one at ' + $script:ConfFile)
-    }
-
-    # ---- 1. Version BEFORE ------------------------------------------------
+    # ---- Update, verified ------------------------------------------------
     Write-Host ''
     Write-Host '---- STEP 1 of 2 - Updating signatures ---------------------------------' -ForegroundColor Cyan
-    $dbBefore = Get-DatabaseInfo
-    Write-Info ('  Before : ' + (Format-DbInfo $dbBefore))
-
-    # ---- 2. Update --------------------------------------------------------
-    $r = Invoke-Freshclam -Activity 'freshclam (updating definitions)'
-    $reasons = @(Test-FreshclamFailed ($r.Output + "`n" + $r.StdErr))
-    if ($r.TimedOut) { $reasons += 'freshclam timed out' }
-
-    # ---- 3. Version AFTER, and compare ------------------------------------
-    $dbAfter = Get-DatabaseInfo
-    Write-Info ('  After  : ' + (Format-DbInfo $dbAfter))
-    if ($dbBefore.Version -ne $dbAfter.Version) {
-        Write-Good ('  Definitions advanced: ' + $dbBefore.Version + ' -> ' + $dbAfter.Version)
-    } elseif ($dbAfter.Found -and $reasons.Count -eq 0) {
-        Write-Good ('  Definitions already current at v' + $dbAfter.Version)
+    $upd = Invoke-ClamUpdateVerified -Interactive $true
+    $dbAfter = $upd.Db
+    $updateOk = $upd.Ok
+    $staleAccepted = $upd.StaleAccepted
+    if ($upd.Aborted) {
+        Write-Host ''
+        Write-Alert '  Stopped. No scan was run. Fix the definitions and try again.'
+        return
     }
 
-    if ($reasons.Count -eq 0 -and $dbAfter.Found) {
-        $updateOk = $true
-    } else {
-        Write-Host ''
-        Write-Caution ('  Update did NOT verify: ' + ($reasons -join '; '))
-        if (-not $dbAfter.Found) { Write-Caution '  The database could not be read after the update.' }
-
-        # ---- 4. One automatic recovery: force a full download -------------
-        Write-Host ''
-        Write-Caution '  Deleting the database files and retrying with a full download.'
-        Write-Caution '  A broken incremental .cdiff patch is the usual cause.'
-        Write-Info ('  Removed ' + (Reset-ClamDatabase) + ' database file(s).')
-
-        $r2 = Invoke-Freshclam -Activity 'freshclam (full download retry)'
-        $reasons2 = @(Test-FreshclamFailed ($r2.Output + "`n" + $r2.StdErr))
-        if ($r2.TimedOut) { $reasons2 += 'freshclam timed out' }
-        $dbAfter = Get-DatabaseInfo
-        Write-Info ('  Retry  : ' + (Format-DbInfo $dbAfter))
-
-        if ($reasons2.Count -eq 0 -and $dbAfter.Found) {
-            $updateOk = $true
-            Write-Good '  Recovery succeeded: definitions are current.'
-        } else {
-            # ---- 5. Still failing: the tech decides, with the age shown ---
-            $ageText = 'UNKNOWN AGE'
-            if ($dbAfter.AgeDays -ne $null) { $ageText = ('' + $dbAfter.AgeDays + ' DAYS OLD') }
-            Write-Host ''
-            Write-Alert '  ******************************************************************'
-            Write-Alert '  *  DEFINITION UPDATE FAILED - SIGNATURES ARE STALE               *'
-            Write-Alert '  ******************************************************************'
-            Write-Alert ('  *  Database : ' + (Format-DbInfo $dbAfter))
-            Write-Alert ('  *  AGE      : ' + $ageText)
-            Write-Alert ('  *  Reason   : ' + ($reasons2 -join '; '))
-            Write-Alert '  *'
-            Write-Alert '  *  Common causes: no internet, or malware on this machine'
-            Write-Alert '  *  blocking AV update servers.'
-            Write-Alert '  *'
-            Write-Alert '  *  A scan on stale signatures MISSES recent malware, and a CLEAN'
-            Write-Alert '  *  result will read as assurance it has not earned. Fix the'
-            Write-Alert '  *  update on the bench first if you possibly can.'
-            Write-Alert '  ******************************************************************'
-            Write-Host ''
-            $answer = ''
-            while ($answer -ne 'YES' -and $answer -ne 'NO') {
-                $answer = ('' + (Read-Host '  Type YES to scan anyway with stale signatures, or NO to stop')).Trim().ToUpper()
-            }
-            if ($answer -eq 'NO') {
-                Write-Host ''
-                Write-Alert '  Stopped. No scan was run. Fix the definitions and try again.'
-                return
-            }
-            $staleAccepted = $true
-            Write-Log 'Tech accepted a scan on stale signatures.'
-        }
-    }
-
-    # ---- 6. Scan ----------------------------------------------------------
+    # ---- Scan ------------------------------------------------------------
     Write-Host ''
     Write-Host '---- STEP 2 of 2 - Scanning --------------------------------------------' -ForegroundColor Cyan
-    $clamscan = Join-Path $script:ClamRoot 'clamscan.exe'
-    if (-not (Test-Path -LiteralPath $clamscan)) { throw ('clamscan.exe not found at ' + $clamscan) }
-
     $targets = @()
     if ($Target -and $Target.Count -gt 0) {
         $targets = @($Target)
@@ -470,74 +254,23 @@ try {
             (Join-Path $env:SystemRoot 'Temp')
         )
     }
-
-    # NO $ ANCHORS in these patterns. Anchoring to end-of-string only matches
-    # a path that ENDS in that name, so clamscan still descends INTO the
-    # directory. The pattern must match anywhere in the path.
-    #   OneDrive: Files On-Demand placeholders HYDRATE when read, so scanning
-    #     them downloads the customer's entire cloud drive.
-    #   All Users / Application Data / Local Settings / Documents and Settings
-    #     are legacy junctions that loop back up the tree.
-    #   Packages / INetCache / System Volume Information / $Recycle.Bin are
-    #     high-volume noise with nothing worth scanning.
-    $excludes = @(
-        '(?i)\\OneDrive',
-        '(?i)\\All Users',
-        '(?i)\\Application Data',
-        '(?i)\\Local Settings',
-        '(?i)\\Documents and Settings',
-        '(?i)\\System Volume Information',
-        '(?i)\\\$Recycle\.Bin',
-        '(?i)\\AppData\\Local\\Packages',
-        '(?i)\\AppData\\Local\\Microsoft\\Windows\\INetCache'
-    )
-
-    $argParts = @(
-        '-r', '-i',
-        ('--database="' + $script:DataDir + '"'),
-        ('--log="' + $script:ScanLog + '"'),
-        '--max-filesize=100M',
-        '--max-scansize=200M',
-        '--max-scantime=5400000',
-        '--cross-fs=no',
-        '--follow-dir-symlinks=0',
-        '--follow-file-symlinks=0'
-    )
-    foreach ($e in $excludes) { $argParts += ('--exclude-dir="' + $e + '"') }
-    foreach ($t in $targets)  { $argParts += ('"' + $t + '"') }
-
     Write-Info ('  Targets : ' + ($targets -join ', '))
     Write-Info ('  Log     : ' + $script:ScanLog)
     Write-Host ''
     Write-Host '  Only infected files are printed. Silence means nothing found.'
     Write-Host ('  Typically 20-40 minutes; hard limit ' + $script:ScanTimeoutMinutes + ' minutes.')
 
-    $scanStart = Get-Date
-    $scan = Invoke-CapturedProcess -FilePath $clamscan -ArgumentString ($argParts -join ' ') `
-        -TimeoutMinutes $script:ScanTimeoutMinutes -Activity 'clamscan'
-    $scanElapsed = (Get-Date) - $scanStart
-    Write-Log ('clamscan stdout:' + [Environment]::NewLine + $scan.Output)
+    $scan = Invoke-ClamScan -Targets $targets -ScanLogPath $script:ScanLog `
+        -TimeoutMinutes $script:ScanTimeoutMinutes
 
-    # ---- 7. Result block --------------------------------------------------
-    $out = ('' + $scan.Output)
-    $infected = $null; if ($out -match '(?m)^Infected files:\s*(\d+)') { $infected = [int]$Matches[1] }
-    $scanned  = $null; if ($out -match '(?m)^Scanned files:\s*(\d+)')  { $scanned  = [int]$Matches[1] }
-    $dataRead = '';    if ($out -match '(?m)^Data scanned:\s*(.+?)\s*$') { $dataRead = $Matches[1] }
-    $hits = @($out -split "`r?`n" | Where-Object { $_ -match ' FOUND$' })
-
-    # LibClamAV logs one stderr line per file it could not open. Those are
-    # locked by running processes and are expected, not a failure - but the
-    # count belongs on the work order, because a huge number means the scan
-    # covered much less than it appears to.
-    $skipped = @($scan.StdErr -split "`r?`n" | Where-Object { $_ -match "(?i)can'?t\s+(open|access|read)" }).Count
-
+    # ---- Result block ----------------------------------------------------
     $bar = ('=' * 78)
     Write-Host ''
     Write-Host $bar -ForegroundColor Cyan
     Write-Host '  CLAMAV RESULT  -  copy onto the work order' -ForegroundColor Cyan
     Write-Host $bar -ForegroundColor Cyan
     Write-Host ('  Machine  : ' + $env:COMPUTERNAME)
-    Write-Host ('  Date     : ' + $script:RunStart.ToString('yyyy-MM-dd HH:mm') + '    Scan time: ' + (Format-Duration $scanElapsed))
+    Write-Host ('  Date     : ' + $script:RunStart.ToString('yyyy-MM-dd HH:mm') + '    Scan time: ' + (Format-Duration $scan.Elapsed))
     Write-Host ('  Database : ' + (Format-DbInfo $dbAfter))
 
     # The age is what says how much a CLEAN below is actually worth, so it
@@ -557,21 +290,21 @@ try {
     if ($updateOk) { Write-Host 'verified' -ForegroundColor Green }
     else           { Write-Host 'FAILED - scanned on stale signatures' -ForegroundColor Red }
 
-    if ($scanned -ne $null) {
-        $line = '  Files    : ' + $scanned + ' scanned'
-        if ($dataRead) { $line += ', ' + $dataRead }
+    if ($scan.Scanned -ne $null) {
+        $line = '  Files    : ' + $scan.Scanned + ' scanned'
+        if ($scan.DataRead) { $line += ', ' + $scan.DataRead }
         Write-Host $line
     }
-    if ($skipped -gt 0) {
-        Write-Host ('  Skipped  : ' + $skipped + ' unreadable (locked by running processes - expected)')
+    if ($scan.Skipped -gt 0) {
+        Write-Host ('  Skipped  : ' + $scan.Skipped + ' unreadable (locked by running processes - expected)')
     }
     Write-Host ('-' * 78)
 
     if ($scan.TimedOut) {
         Write-Alert ('  RESULT: INCOMPLETE - hit the ' + $script:ScanTimeoutMinutes + '-minute limit')
-    } elseif ($infected -ne $null -and $infected -gt 0) {
-        Write-Alert ('  RESULT: ' + $infected + ' INFECTED FILE(S)')
-        foreach ($h in $hits) { Write-Alert ('    ' + $h.Trim()) }
+    } elseif ($scan.Infected -ne $null -and $scan.Infected -gt 0) {
+        Write-Alert ('  RESULT: ' + $scan.Infected + ' INFECTED FILE(S)')
+        foreach ($h in $scan.Hits) { Write-Alert ('    ' + $h.Trim()) }
         Write-Host ''
         Write-Alert '  ClamAV does NOT remove anything. Every FOUND file must be'
         Write-Alert '  handled by hand, then re-scan that path:'
@@ -588,6 +321,7 @@ try {
     Write-Host '  Logs (on this machine, not the stick):' -ForegroundColor DarkGray
     Write-Host ('    ' + $script:ScanLog) -ForegroundColor DarkGray
     if ($script:LogPath) { Write-Host ('    ' + $script:LogPath) -ForegroundColor DarkGray }
+
 } catch {
     Write-Host ''
     Write-Host ('FATAL ERROR: ' + $_.Exception.Message) -ForegroundColor Red

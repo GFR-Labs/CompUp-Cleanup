@@ -19,9 +19,10 @@ in `Scripts\`, out of the way.
 |------|---------|
 | `Run-Cleanup.cmd` | Double-click this on the customer machine. Elevates itself (UAC prompt), bypasses execution policy, launches the cleanup, and keeps the window open no matter what. |
 | `Update.cmd` | Double-click this on the BENCH machine to bring the stick up to the repo's current state. Self-contained: `git pull` when git exists, otherwise downloads the repo zip. Never touches `Tools\`. |
-| `Scan-Clam.cmd` | Double-click on the customer machine for the ClamAV step. Updates definitions, VERIFIES the update actually landed, then scans. |
-| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself, 11 steps: drive health gate, restore point, temp cleanup, browser caches, Defender definition update + full scan, chkdsk online scan, DISM RestoreHealth, component store cleanup, Windows disk cleanup, SFC. Prints the work-order summary and findings. |
-| `Scripts\Scan-Clam.ps1` | The ClamAV update-and-scan logic behind `Scan-Clam.cmd`. |
+| `Scan-Clam.cmd` | Re-scan ONE folder after removing something ClamAV found: `Scan-Clam.cmd "C:\path"`. The normal cleanup run already includes a ClamAV scan, so this is not part of a standard job. |
+| `Scripts\Invoke-Cleanup.ps1` | The cleanup itself, 11 steps: drive health gate, restore point, temp cleanup, browser caches, Defender definitions, ClamAV scan, chkdsk online scan, DISM RestoreHealth, component store cleanup, Windows disk cleanup, SFC. Prints the work-order summary and findings. The Defender FULL scan is deliberately manual - see the SOP. |
+| `Scripts\Scan-Clam.ps1` | Standalone ClamAV run behind `Scan-Clam.cmd`, for re-scanning one folder after remediation. |
+| `Scripts\ClamAV.Lib.ps1` | Shared ClamAV update-and-scan logic, dot-sourced by both the cleanup script and `Scan-Clam.ps1` so they cannot drift. |
 | `Scripts\SOP-Cleanup.md` | The tech-facing procedure, step by step. Read it before your first run. |
 | `.gitignore` / `.gitattributes` | Keep tool binaries and logs out of the repo; keep line endings byte-exact. |
 
@@ -40,6 +41,7 @@ X:\CompUp-Cleanup\
     Scripts\
         Invoke-Cleanup.ps1
         Scan-Clam.ps1
+        ClamAV.Lib.ps1
         SOP-Cleanup.md
     Tools\                   <- NOT in the repo; download by hand
         ClamAV\              (clamscan.exe, freshclam.exe, sigtool.exe,

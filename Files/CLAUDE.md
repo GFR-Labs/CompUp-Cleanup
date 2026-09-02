@@ -79,8 +79,8 @@ the run. Show a progress indicator per step and an overall "step N of M".
 | 2 | Restore point | `Checkpoint-Computer -Description "Pre-Cleanup" -RestorePointType MODIFY_SETTINGS` | success/failure |
 | 3 | Temp cleanup | Native PowerShell delete: `%TEMP%`, `C:\Windows\Temp`, `C:\Windows\Prefetch`, recycle bin | bytes freed, files deleted |
 | 3b | Browser caches | Native delete across EVERY profile in `C:\Users`: Chrome/Edge/Brave `Cache` and `Code Cache`, Firefox `cache2`, `thumbcache_*.db`, `INetCache` | bytes freed per category |
-| 4 | Definition update | `Update-MpSignature` | signature version before/after |
-| 5 | Defender full scan | `Start-MpScan -ScanType FullScan` | detections via `Get-MpThreatDetection` filtered to this run |
+| 4 | Defender definitions | `Update-MpSignature`, plus a READ-ONLY posture check (AMRunningMode, PUA, third-party AV) | version before/after, passive mode |
+| 5 | ClamAV scan | `Scripts/ClamAV.Lib.ps1`: verified freshclam update, then clamscan | infected count, FOUND lines, defs age |
 | 6 | Disk check | `chkdsk C: /scan` | errors found / clean |
 | 7 | DISM | `Dism.exe /Online /Cleanup-Image /RestoreHealth` | "restore operation completed successfully", error codes, real % progress |
 | 8 | Component cleanup | `Dism.exe /Online /Cleanup-Image /StartComponentCleanup` | free-space delta, real % progress |
@@ -104,6 +104,16 @@ definition update. SFC runs LAST so it verifies integrity after the cleanup step
   for third-party AV. In passive mode Defender still scans and detects but does NOT
   remediate. Report this clearly - a CLEAN result from passive Defender is not the same
   assurance as one from an active scan.
+- **The Defender FULL SCAN is manual, in the SOP - do not automate it again.** It ran
+  one to three hours emitting nothing, so a slow scan and a hung one were
+  indistinguishable and techs killed healthy runs. Driven by hand from Windows
+  Security the tech gets a live file count. The script still updates Defender's
+  definitions, so the manual scan starts current, and still reports passive mode and
+  PUA state so the tech knows what to expect. ClamAV is the automated scan instead: a
+  different engine, visible per-file progress, unaffected by Defender being passive.
+- **ClamAV logic lives in `Scripts/ClamAV.Lib.ps1`, dot-sourced by BOTH**
+  `Invoke-Cleanup.ps1` (the scan step) and `Scan-Clam.ps1` (targeted re-scan after
+  remediation). Never duplicate it into one of them - they must not drift.
 - **Do NOT try to promote Defender to active mode for the scan.** Windows Security
   Center decides which engine is primary; while a third-party AV is registered,
   Defender stays passive. The `ForceDefenderPassiveMode` policy only forces passive,
