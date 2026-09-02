@@ -19,7 +19,7 @@
 # ===========================================================================
 
 # Optional: scan a specific path instead of the standard target set.
-#   Scan-Clam.cmd "C:\Users\jane\Downloads"
+#   Scripts\Scan-Clam.cmd "C:\Users\jane\Downloads"
 # No $PSScriptRoot in this default - it is not reliably populated while
 # parameter defaults evaluate. Nothing is ever assigned to $args.
 param([string[]]$Target)
@@ -308,7 +308,7 @@ try {
         Write-Host ''
         Write-Alert '  ClamAV does NOT remove anything. Every FOUND file must be'
         Write-Alert '  handled by hand, then re-scan that path:'
-        Write-Alert '      Scan-Clam.cmd "C:\path\to\folder"'
+        Write-Alert '      Scripts\Scan-Clam.cmd "C:\path\to\folder"'
     } elseif ($scan.ExitCode -eq 2) {
         Write-Caution '  RESULT: completed with errors - read the scan log'
     } elseif ($staleAccepted) {

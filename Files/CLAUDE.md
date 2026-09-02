@@ -20,7 +20,9 @@ what is on the stick.
 1. `Scripts/Invoke-Cleanup.ps1` - the main script
 2. `Run-Cleanup.cmd` - double-click launcher
 3. `Update.cmd` - single self-contained file that refreshes the stick from the repo
-3b. `Scan-Clam.cmd` + `Scripts/Scan-Clam.ps1` - ClamAV update (verified) then scan
+3b. `Scripts/Scan-Clam.cmd` + `Scripts/Scan-Clam.ps1` - standalone ClamAV re-scan of one
+    path, for use after remediating what the cleanup run found. NOT a standard-job file,
+    which is why it is not at the root.
 4. `README.md` - what each file does, USB folder layout, how to update
 5. `Scripts/SOP-Cleanup.md` - the tech-facing procedure, written as numbered steps
 
@@ -32,8 +34,10 @@ INSIDE the repo - moving them outside the clone means `git pull` can never updat
 them again.
 
 Three places encode this layout and must change together: `Run-Cleanup.cmd` resolves
-`%~dp0Scripts\Invoke-Cleanup.ps1`, `Scan-Clam.cmd` resolves `%~dp0Scripts\Scan-Clam.ps1`,
-and `Update.cmd` uses the first of those as its "is this a cleanup stick" sentinel.
+`%~dp0Scripts\Invoke-Cleanup.ps1`, `Scripts\Scan-Clam.cmd` resolves `%~dp0Scan-Clam.ps1`
+(both are in `Scripts\`), and `Update.cmd` uses the first of those as its "is this a
+cleanup stick" sentinel. Only the two launchers a tech runs on a normal job -
+`Run-Cleanup.cmd` and `Update.cmd` - belong at the root.
 
 `.gitattributes` and `.gitignore` MUST stay at the repo root. Both only apply from
 their own directory down, so a copy under `Files\` protects `Files\` alone and leaves
@@ -160,7 +164,8 @@ The script must NOT print them: on screen they pushed the run past one screen an
 the summary the tech actually copies onto the work order. `Invoke-Cleanup.ps1` ends at
 the summary, findings, warnings, verdict, and the run-log path.
 
-1. **ClamAV scan** - now scripted as `Scan-Clam.cmd`; the SOP step is to run it.
+1. **ClamAV scan** - now automated as step 6 of the cleanup run; `Scripts/Scan-Clam.cmd`
+   re-scans a single path afterwards.
    It updates then scans, with the OneDrive and legacy-junction exclusions built in.
    **freshclam exiting 0 does not prove it downloaded anything** - it has reported the
    database a version behind and still returned success, and a scan on stale signatures

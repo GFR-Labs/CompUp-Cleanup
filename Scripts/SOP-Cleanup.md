@@ -16,8 +16,9 @@ gate, at the summary, and in the manual checklist.
 > looked identical. Driven by hand from Windows Security you get a live file
 > count and can tell the difference.
 >
-> `Scan-Clam.cmd` exists for ONE job: re-scanning a single folder after you
-> have removed something ClamAV found. You do not run it as part of a normal
+> `Scripts\Scan-Clam.cmd` exists for ONE job: re-scanning a single folder
+> after you have removed something ClamAV found. It sits in `Scripts\`
+> rather than the stick root precisely because it is not part of a normal
 > cleanup.
 
 ## Before you start
@@ -123,7 +124,7 @@ them from this document.
     - Remove or quarantine what is genuinely malicious.
     - **Re-scan that folder to confirm**, rather than trusting the delete:
 
-          Scan-Clam.cmd "C:\Users\name\Downloads"
+          Scripts\Scan-Clam.cmd "C:\Users\name\Downloads"
 
     - Repeat until that path comes back clean.
 

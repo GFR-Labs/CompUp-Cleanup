@@ -66,7 +66,7 @@ $script:DismTimeoutMinutes      = 180
 $script:SfcTimeoutMinutes       = 120
 $script:ComponentCleanupTimeoutMinutes = 120
 $script:CleanMgrTimeoutMinutes         = 90
-# Shorter than Scan-Clam.cmd's standalone 240: inside the chain a stuck scan
+# Shorter than Scripts\Scan-Clam.cmd's standalone 240: in the chain a stuck scan
 # holds up every step behind it, and 20-40 minutes is the normal range.
 $script:ClamScanTimeoutMinutes         = 120
 $script:FreshclamTimeoutMinutes        = 30
@@ -847,7 +847,7 @@ function Step-ClamScan {
     }
     if ($scan.Infected -ne $null -and $scan.Infected -gt 0) {
         foreach ($h in $scan.Hits) { Add-Finding ('ClamAV FOUND: ' + $h.Trim()) }
-        Add-Finding 'ClamAV only reports - it removed nothing. Handle each FOUND file by hand, then re-scan that path with: Scan-Clam.cmd "C:\path\to\folder"'
+        Add-Finding 'ClamAV only reports - it removed nothing. Handle each FOUND file by hand, then re-scan that path with: Scripts\Scan-Clam.cmd "C:\path\to\folder"'
         Add-CustomerWarning ('A second-opinion scan found ' + $scan.Infected + ' infected file(s). These were NOT removed automatically and need manual remediation.')
         return @{ Status = 'THREAT'; Detail = ('' + $scan.Infected + ' infected - see findings') }
     }
